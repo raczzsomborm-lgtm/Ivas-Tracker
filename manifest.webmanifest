@@ -1,7 +1,7 @@
 {
-  "name": "Strigula – buli számláló",
-  "short_name": "Strigula",
-  "description": "Buli számláló barátoknak: ki mennyit ivott, élőben.",
+  "name": "Másnapló",
+  "short_name": "Másnapló",
+  "description": "Ami tegnap még jó ötletnek tűnt. Buli számláló és verseny barátoknak.",
   "lang": "hu",
   "start_url": "./",
   "scope": "./",

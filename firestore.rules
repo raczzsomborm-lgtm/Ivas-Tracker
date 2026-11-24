@@ -2,6 +2,32 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Valódi fiókkal (felhasználónév + jelszó) belépett felhasználó.
+    // A vendég (anonim) munkamenet ezt nem teljesíti, így fiók nélkül semmi nem látható és nem írható.
+    function member() {
+      return request.auth != null && ('email' in request.auth.token);
+    }
+    function isMe(uid) {
+      return member() && request.auth.uid == uid;
+    }
+    function validUsername(key, u) {
+      return u is string
+        && u.matches('^[A-Za-z0-9][A-Za-z0-9_.-]{2,19}$')
+        && key == u.lower();
+    }
+    function ownsUsername(d) {
+      return d.usernameKey is string
+        && getAfter(/databases/$(database)/documents/usernames/$(d.usernameKey)).data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/usernames/$(d.usernameKey)).data.username == d.username;
+    }
+    // Felhasználónév-rekord: e-mail nélküli fióknál a belső belépési cím, e-mailes fióknál csak egy jelzés,
+    // így a valódi e-mail-cím soha nem kerül ide.
+    function validMapping(key, d) {
+      return d.keys().hasOnly(['uid', 'email', 'username', 'createdAt', 'hasEmail', 'emailPending'])
+        && d.uid == request.auth.uid
+        && (!('email' in d) || d.email == request.auth.token.email)
+        && validUsername(key, d.username);
+    }
     function validPlayer(d) {
       return d.keys().hasOnly(['v', 'name', 'cats', 'recent', 'updatedAt'])
         && d.name is string && d.name.size() > 0 && d.name.size() <= 24
@@ -10,37 +36,66 @@ service cloud.firestore {
         && d.updatedAt is number;
     }
 
-    // A buli neve és kezdete: bárki láthatja és átnevezheti, aki bent van az appban.
-    match /parties/{party} {
-      allow read: if request.auth != null;
-      allow create, update: if request.auth != null
-                            && request.resource.data.keys().hasOnly(['name', 'createdAt', 'updatedAt'])
-                            && request.resource.data.name is string
-                            && request.resource.data.name.size() > 0
-                            && request.resource.data.name.size() <= 40
-                            && request.resource.data.createdAt is number
-                            && request.resource.data.updatedAt is number;
+    // Felhasználónév -> fiók. Egy név csak egyszer létezhet (a dokumentum azonosítója a kisbetűs név).
+    // Belépéskor a vendég munkamenet is lekérdezhet egy nevet, de listázni senki sem tudja őket.
+    match /usernames/{key} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if member() && validMapping(key, request.resource.data);
+      allow update: if member() && resource.data.uid == request.auth.uid && validMapping(key, request.resource.data);
+      allow delete: if member() && resource.data.uid == request.auth.uid;
     }
 
-    // Egy buli résztvevői: aki bent van az appban, olvashatja őket,
-    // de mindenki csak a saját számlálóját írhatja és törölheti.
-    match /parties/{party}/players/{uid} {
-      allow read: if request.auth != null;
-      allow create, update: if request.auth != null
-                            && request.auth.uid == uid
-                            && validPlayer(request.resource.data);
-      allow delete: if request.auth != null && request.auth.uid == uid;
-    }
-
-    // Éves és összesített statisztika: mindenki láthatja az összesítéshez,
-    // de csak a sajátját növelheti.
+    // Profil és statisztika: mindenki láthatja az összesítéshez, de csak a sajátját írhatja,
+    // és csak olyan felhasználónevet tehet bele, ami tényleg az övé.
     match /users/{uid} {
-      allow read: if request.auth != null;
-      allow create, update: if request.auth != null
-                            && request.auth.uid == uid
-                            && request.resource.data.keys().hasOnly(['v', 'total', 'years', 'updatedAt'])
-                            && (!('total' in request.resource.data) || request.resource.data.total is map)
-                            && (!('years' in request.resource.data) || request.resource.data.years is map);
+      allow read: if member() || (request.auth != null && request.auth.uid == uid);
+      allow create, update: if isMe(uid)
+        && request.resource.data.keys().hasOnly(['v', 'total', 'years', 'days', 'username', 'usernameKey', 'updatedAt'])
+        && (!('total' in request.resource.data) || request.resource.data.total is map)
+        && (!('years' in request.resource.data) || request.resource.data.years is map)
+        && (!('days' in request.resource.data) || request.resource.data.days is map)
+        && (!('username' in request.resource.data) || ownsUsername(request.resource.data));
+      allow delete: if isMe(uid);
+    }
+
+    // Csak a tulajdonos láthatja: a hozzájárulása és azoknak a buliknak a listája, amelyekben részt vett
+    // (ez kell ahhoz, hogy fióktörléskor minden adata törlődjön).
+    match /private/{uid} {
+      allow read: if isMe(uid);
+      allow create, update: if isMe(uid)
+        && request.resource.data.keys().hasOnly(['consent', 'parties', 'updatedAt'])
+        && (!('consent' in request.resource.data) || request.resource.data.consent is map)
+        && (!('parties' in request.resource.data) || request.resource.data.parties is map);
+      allow delete: if isMe(uid);
+    }
+
+    // A buli neve és kezdete.
+    match /parties/{party} {
+      allow read: if member();
+      allow create, update: if member()
+        && request.resource.data.keys().hasOnly(['name', 'createdAt', 'updatedAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 40
+        && request.resource.data.createdAt is number
+        && request.resource.data.updatedAt is number;
+    }
+
+    // Egy buli résztvevői: mindenki csak a saját számlálóját írhatja és törölheti.
+    match /parties/{party}/players/{uid} {
+      allow read: if member();
+      allow create, update: if isMe(uid) && validPlayer(request.resource.data);
+      allow delete: if isMe(uid);
+    }
+
+    // Hányás-szavazás: mindenki csak a saját szavazatait írhatja.
+    match /parties/{party}/votes/{uid} {
+      allow read: if member();
+      allow create, update: if isMe(uid)
+        && request.resource.data.keys().hasOnly(['on', 'updatedAt'])
+        && request.resource.data.on is map;
+      allow delete: if isMe(uid);
     }
   }
 }

@@ -1,68 +1,85 @@
-# Strigula – buli számláló (önálló verzió)
+# MÁSNAPLÓ – „Ami tegnap még jó ötletnek tűnt”
 
-Telefonra telepíthető webes alkalmazás (PWA). Mindenki a saját fülén vezeti, mit ivott, és a többiek élőben látják.
-Nem kell hozzá Claude-fiók: az adatokat a saját, ingyenes Firebase projekted tárolja.
+Telefonra telepíthető buli számláló és verseny barátoknak. Mindenki a saját fiókjával lép be,
+a saját fülén vezeti, mit ivott, és a többiek élőben látják.
 
 ## Mi van a mappában
 
 - `index.html`, `app.js`: maga az app
-- `backend.js`: a Firebase kapcsolat
-- `config.js`: **ide kell beírnod a saját Firebase adataidat**
+- `backend.js`: a Firebase kapcsolat (fiókok és adatbázis)
+- `config.js`: a Firebase projekted adatai (már ki van töltve az ivas-tracker projekttel)
 - `firestore.rules`: az adatbázis szabályai, ezt a Firebase konzolba kell bemásolni
-- `manifest.webmanifest`, `sw.js`, `icons/`: ettől települ appként a telefonra, és indul el gyenge neten is
+- `manifest.webmanifest`, `sw.js`, `icons/`: ettől települ appként a telefonra
 
-## 1. Firebase projekt (kb. 10 perc, ingyenes)
+## Frissítés a korábbi változatról (adatvédelmi frissítés)
 
-1. Nyisd meg a https://console.firebase.google.com oldalt, és hozz létre egy új projektet (például `strigula` néven). A Google Analytics kikapcsolható.
-2. Bal oldalt: **Build → Authentication → Get started**, majd a **Sign-in method** fülön kapcsold be az **Anonymous** módot, és mentsd.
-3. **Build → Firestore Database → Create database.** Ha kérdezi, válaszd a Standard változatot, helynek egy európait (például `eur3` vagy `europe-west3`), és a **Production mode**-ot.
-4. A Firestore **Rules** fülén töröld ki, ami ott van, másold be a `firestore.rules` teljes tartalmát, és nyomj **Publish**-t.
-5. Fogaskerék → **Project settings → General → Your apps** → Web ikon (`</>`). Adj nevet, a Firebase Hosting jelölőnégyzet nem kell. Megjelenik egy `const firebaseConfig = { ... }` blokk.
-6. A `config.js` fájlban cseréld le az `IDE_JON…` értékeket a kapott értékekre (`apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId`, `appId`).
+1. **`config.js`:** a fájl alján a `MASNAPLO_PRIVACY` részbe írd be a nevedet (te vagy az adatkezelő)
+   és egy elérhetőséget, például az e-mail-címedet. Ez jelenik meg az adatkezelési tájékoztatóban.
+2. **Firebase → Firestore → Rules:** cseréld le a szabályokat az új `firestore.rules` tartalmára, és **Publish**.
+3. **Firebase → Security → Authentication → Settings → User actions:** az **Enable deletion** legyen bekapcsolva
+   (alapból be van), különben a fióktörlés nem működik.
+4. Nem kötelező, de ajánlott: **Authentication → Templates** alatt a levelek nyelvét állítsd magyarra.
+   Ha a Firebase a projekt beállításainál felajánlja a Google adatfeldolgozási feltételeinek (Data Processing Terms)
+   elfogadását, azt is fogadd el.
+5. **GitHub:** **Add file → Upload files**, húzd be a mappa teljes tartalmát, és **Commit changes**.
+6. Várj pár percet, zárd be teljesen az appot, és nyisd meg újra. Mindenki egyszer látni fog egy
+   hozzájárulási képernyőt: ott el kell fogadnia a tájékoztatót, vagy törölheti a fiókját.
 
-Ezek az adatok nem titkosak, nyugodtan lehetnek nyilvános helyen: a védelmet a szabályok adják
-(mindenki csak a saját számlálóját írhatja, és csak az láthatja a bulit, aki ismeri a kódját).
+Ha még a fiókok előtti változatról frissítesz, előbb kapcsold be az **Email/Password** bejelentkezést is
+(Authentication → Sign-in method → Add new provider → Email/Password), az Anonymous pedig maradjon bekapcsolva.
 
-## 2. Feltöltés GitHub Pagesre (ingyenes)
+## Fiókok
 
-1. A github.com-on hozz létre új, **Public** repository-t (például `strigula`).
-2. Kattints az „uploading an existing file” linkre, húzd be a mappa **tartalmát** (az `icons` mappát is), és **Commit changes**.
-   Ha az `icons` mappa nem jönne át, töltsd fel külön: **Add file → Upload files**, és húzd be a mappát.
-3. **Settings → Pages**: Source legyen **Deploy from a branch**, Branch **main** és **/ (root)**, majd **Save**.
-   Egy-két perc múlva itt fut: `https://FELHASZNALONEV.github.io/strigula/`
-4. Firebase konzol: **Authentication → Settings → Authorized domains → Add domain**, és add hozzá: `FELHASZNALONEV.github.io`
+- Felhasználónév: 3–20 karakter, angol betűk, számok, pont, kötőjel vagy aláhúzás, ékezet nélkül.
+  Minden név csak egyszer létezhet (a kis- és nagybetű nem számít különbözőnek). A Beállításokban módosítható.
+- Jelszó: legalább 8 karakter, legyen benne kisbetű, nagybetű és szám.
+- **E-mail-cím (nem kötelező):** regisztrációkor vagy később a Beállításokban adható meg. Csak az elfelejtett
+  jelszó visszaállításához kell, és senki más nem látja.
+  - Akinek van e-mail-címe, az **az e-mail-címével lép be** (a felhasználóneve marad a neve az appban).
+    Erre azért van szükség, mert különben a valódi e-mail-címet a nyilvánosan lekérdezhető név-rekordban
+    kellene tárolni, és bárki kiolvashatná.
+  - Később hozzáadott címnél a Firebase megerősítő levelet küld; a cím a levélben lévő linkre kattintás után
+    lesz a fiók címe, onnantól azzal kell belépni.
+  - A levelek a `noreply@ivas-tracker.firebaseapp.com` címről jönnek, és a levélszemét mappába is kerülhetnek.
+- **Elfelejtett jelszó:** a belépő képernyőn „Elfelejtettem a jelszavam”. Csak e-mail-címmel rendelkező fióknál
+  működik; e-mail nélkül a jelszót nem lehet visszaállítani, ilyenkor új fiók kell.
+- Ugyanazzal a fiókkal több telefonról is be lehet lépni.
 
-## 3. Telefonra telepítés
+## Adatvédelem
 
-- **iPhone:** nyisd meg a linket Safariban → Megosztás ikon → **Főképernyőhöz adás**. Ezután **az ikonról indítva** lépj be
-  (iPhone-on a kitett app külön tárolót kap, ezért ha előbb Safariban lépnél be, kétszer szerepelnél).
-- **Android:** nyisd meg a linket Chrome-ban → ⋮ menü → **Alkalmazás telepítése** vagy **Hozzáadás a kezdőképernyőhöz**.
-  Az appban is megjelenhet egy Telepítés gomb.
+- Regisztrációkor kötelező bejelölni, hogy az illető elmúlt 18 éves, és hozzájárul az adatkezeléshez.
+  A hozzájárulás időpontja a szerveren, csak a tulajdonos számára olvashatóan tárolódik.
+- Az adatkezelési tájékoztató a regisztrációnál és a Beállításokban is elérhető.
+- **Fiókom törlése** (Beállítások): a jelszó megadása után törli a fiókot, a felhasználónevet, a statisztikát,
+  valamint a számlálókat és a szavazatokat minden olyan buliból, amelyet a felhasználó ezzel a fiókkal bármelyik
+  eszközén megnyitott a frissítés után. Ha valakinek egy régebbi buliban mégis maradna adata (például egy azóta
+  nem használt telefonról), azt a Firebase konzolban kézzel lehet törölni: Firestore → `parties` → a buli kódja →
+  `players`, illetve `votes` → az illető azonosítója.
 
 ## Használat
 
-- Első indításkor megadod a neved és a buli kódját. Ha te indítod a bulit, koppints az „Új bulit indítok” linkre, az ad egy kódot.
-- A **Mindenki** fülön a **Barátok meghívása** gombbal elküldheted a linket; aki megnyitja, annak a kód már ki van töltve.
-- A **+1** gomb az adott kategóriában az utoljára választott italt írja fel. Egy sorra koppintva fajtánként vezetheted, javíthatsz (−), és saját italt is felvehetsz.
-- Elkoppintás után 5 másodpercig ott a **Visszavonás**.
-- **Bulik elnevezése:** új bulinál megadhatod a nevét (például „Szilveszter 2026”), később a Beállításokban át is nevezheted.
-  A név fent, a fejlécben látszik, és mindenkinél ugyanaz.
-- **Bulijaim:** a fejlécben a buli nevére koppintva látod a korábbi bulijaidat. Egyre koppintva visszamész,
-  és megnézheted, ki mennyit ivott ott; a Mindenki fülön az „Ezen a bulin együtt” rész a közös összeget mutatja.
-  Innen indíthatsz új bulit is. A lista azon a telefonon tárolódik, ahol a bulit megnyitottad.
-- Gyenge térerőnél is felírhatsz: az app elmenti, és amint visszajön a net, elküldi.
-- **Statisztika:** a saját füleden alul látod, mennyit ittál idén és összesen, az összes bulidból összeadva.
-  A Mindenki fülön ugyanez van mindenkire együtt. A nullázás, a buliváltás és a kilépés ezt nem törli.
-  A saját statisztika ahhoz a telefonhoz (böngészőhöz) tartozik, amelyikről beírtad.
+- **Menü (☰):** fogaskerék és „Beállítások”, alatta vékony csík után a korábbi bulijaid (görgethető lista).
+  Egy bulira koppintva megnyílik, és látod, ki mennyit ivott ott. Itt indíthatsz új bulit is.
+- **Beállítások:** mértékegység (metrikus vagy imperial), felhasználónév, kijelentkezés,
+  és az aktuális buli dolgai (név, meghívás, nullázás, kilépés).
+- **Mennyiségek:** rövid 4 cl, bor 1 dl, sör 5 dl, víz vagy üdítő 3 dl darabonként.
+  Imperialban brit fl oz és pint.
+- **Grafikon:** a saját füleden alul, naponta, színekre bontva. Egy színre koppintva kiírja, mi az és hány darab.
+  Egy buli-nap hajnali 6-tól másnap hajnali 6-ig tart, így az éjfél utáni italok is ugyanahhoz a bulihoz kerülnek.
+  A grafikon ettől a frissítéstől kezdve gyűjti az adatokat.
+- **Verseny:** a Mindenki fülön. Pontok: rövid +5, bor +3, sör +2, víz vagy üdítő +0,25.
+- **Hányás-szavazás:** egy ember fülén a többiek szavazhatnak (az illető saját magára nem).
+  Ha a többiek több mint fele igennel szavaz, hányásonként −20 pont. Ilyenkor megjelenik a „Szerinted hányszor?” kérdés:
+  ha a beküldött számok egyeznek, annyiszor −20 pont; ha eltérnek, vagy senki nem adott meg számot, 1 hányás számít.
 
-## Ha már feltöltötted egy korábbi változatot
+## Teljesen új telepítés (ha egyszer újra kellene kezdeni)
 
-1. Töltsd fel újra a fájlokat: GitHubon **Add file → Upload files**, és húzd be újra a mappa teljes tartalmát.
-   Az azonos nevű fájlokat a GitHub felülírja.
-2. A Firebase konzolban a Firestore **Rules** fülén cseréld le a szabályokat az új `firestore.rules` tartalmára, és **Publish**.
-   Ha ezt kihagyod, a számlálók működnek, de a statisztikánál és a buli elnevezésénél az app szól, hogy frissíteni kell a szabályokat.
-3. A GitHub Pages pár percig még a régi fájlokat adhatja. Ha nem látod a változást, zárd be teljesen az appot, és néhány perc múlva nyisd meg újra.
+1. console.firebase.google.com: új projekt, Firestore adatbázis (Standard, `(default)`, európai hely, production mode).
+2. Authentication: az **Anonymous** és az **Email/Password** bejelentkezés bekapcsolása.
+3. Firestore Rules: a `firestore.rules` tartalma, Publish.
+4. Project settings → Your apps → Web app: a kapott adatokat írd be a `config.js` fájlba.
+5. Feltöltés GitHub Pagesre, majd Authentication → Settings → Authorized domains: `FELHASZNALONEV.github.io`.
 
 ## Költség
 
-A Firebase ingyenes (Spark) csomagja napi 50 000 olvasást és 20 000 írást ad, ez egy baráti társaságnak bőven elég, és nem kell hozzá bankkártya.
+A Firebase ingyenes (Spark) csomagja napi 50 000 olvasást és 20 000 írást ad, ez egy baráti társaságnak bőven elég.
