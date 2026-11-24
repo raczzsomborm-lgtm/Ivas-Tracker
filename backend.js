@@ -88,6 +88,19 @@ function hand(backend, problem) {
     deletePlayer(party, uid) {
       return fs.deleteDoc(playerRef(party, uid));
     },
+    // A buli neve és kezdete: parties/{party}
+    watchParty(party, next, onError) {
+      return fs.onSnapshot(fs.doc(db, "parties", party),
+        (snap) => next(snap.exists() ? snap.data() : null),
+        (err) => onError(err));
+    },
+    async getPartyMeta(party) {
+      const s = await fs.getDoc(fs.doc(db, "parties", party));
+      return s.exists() ? s.data() : null;
+    },
+    setPartyMeta(party, data) {
+      return fs.setDoc(fs.doc(db, "parties", party), data);
+    },
     // Éves és összesített statisztika: users/{uid}, atomikus növeléssel,
     // így több eszközről vagy gyenge netről is pontos marad.
     watchStats(next, onError) {

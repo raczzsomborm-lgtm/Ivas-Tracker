@@ -28,6 +28,7 @@
     writeTimer: null, pending: 0,
     installPrompt: null,
     stats: new Map(), statsDelta: {}, statsTimer: null, statsError: false,
+    partyMeta: null, metaUnsub: null, onboardNew: false,
   };
 
   /* ---------- helpers ---------- */
@@ -88,6 +89,87 @@
     const b = new Uint8Array(8);
     crypto.getRandomValues(b);
     return "buli-" + Array.from(b, x => a[x % a.length]).join("");
+  }
+  /* ---------- named parties + "Bulijaim" list (kept on this phone) ---------- */
+  const PARTY_NAME_MAX = 40;
+  function cleanPartyName(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().slice(0, PARTY_NAME_MAX); }
+  function fmtDate(t) {
+    try { return new Date(t).toLocaleDateString("hu-HU", { year: "numeric", month: "long", day: "numeric" }); }
+    catch (e) { return ""; }
+  }
+  function defaultPartyName() { return "Buli, " + fmtDate(Date.now()); }
+  function loadParties() {
+    let a = [];
+    try { a = JSON.parse(lsGet("strigula-parties") || "[]"); } catch (e) {}
+    if (!Array.isArray(a)) return [];
+    return a.filter(p => p && typeof p.code === "string" && cleanParty(p.code) === p.code)
+      .map(p => ({ code: p.code, name: typeof p.name === "string" ? cleanPartyName(p.name) : "", at: num(p.at), created: num(p.created) }));
+  }
+  function saveParties(list) { lsSet("strigula-parties", JSON.stringify(list.slice(0, 60))); }
+  function rememberParty(code, patch) {
+    if (!code) return;
+    const list = loadParties();
+    let p = list.find(x => x.code === code);
+    if (!p) { p = { code, name: "", at: 0, created: 0 }; list.push(p); }
+    Object.assign(p, patch || {});
+    list.sort((a, b) => b.at - a.at);
+    saveParties(list);
+  }
+  function forgetParty(code) { saveParties(loadParties().filter(p => p.code !== code)); }
+  function partyTitle() {
+    if (S.partyMeta && S.partyMeta.name) return S.partyMeta.name;
+    const saved = loadParties().find(p => p.code === S.party);
+    return (saved && saved.name) || S.party || "";
+  }
+  function partyHintText() { return S.partyMeta && S.partyMeta.name ? "Buli: " + S.partyMeta.name : ""; }
+  function guessStart() {
+    let t = Infinity;
+    for (const d of allPeople().values()) for (const r of d.recent) if (r.t && r.t < t) t = r.t;
+    return Number.isFinite(t) ? t : Date.now();
+  }
+  function watchMeta() {
+    const party = S.party;
+    if (!party || typeof S.backend.watchParty !== "function") return;
+    try {
+      S.metaUnsub = S.backend.watchParty(party, (data) => {
+        if (S.party !== party) return;
+        const name = data ? cleanPartyName(data.name) : "";
+        S.partyMeta = name ? { name, createdAt: num(data.createdAt) } : null;
+        if (S.partyMeta) rememberParty(party, { name, created: S.partyMeta.createdAt });
+        const hint = document.getElementById("partyHint");
+        if (hint) hint.textContent = partyHintText();
+        renderAll();
+      }, () => {});
+    } catch (e) {}
+  }
+  function savePartyName(raw) {
+    const name = cleanPartyName(raw);
+    if (!name || !S.party) return false;
+    const party = S.party;
+    const now = Date.now();
+    const createdAt = (S.partyMeta && S.partyMeta.createdAt) || guessStart();
+    S.partyMeta = { name, createdAt };
+    rememberParty(party, { name, created: createdAt });
+    renderAll();
+    if (typeof S.backend.setPartyMeta !== "function") return true;
+    Promise.resolve().then(() => S.backend.setPartyMeta(party, { name, createdAt, updatedAt: now })).catch((e) => {
+      toast(errCode(e) === "permission-denied"
+        ? "A buli nevéhez frissíteni kell a Firestore szabályokat."
+        : "A buli nevét nem sikerült elmenteni. Nézd meg a netet.");
+    });
+    return true;
+  }
+  function openParty(code) {
+    closeSheet();
+    if (!code || code === S.party) return;
+    flushAll();
+    S.myDoc = null;
+    S.readOnly = false;
+    S.view = "me";
+    S.phase = "loading";
+    setParty(code);
+    renderAll();
+    window.scrollTo(0, 0);
   }
   function inviteUrl() {
     const u = new URL(location.href);
@@ -333,22 +415,29 @@
   }
   function setParty(party) {
     if (S.unsub) { try { S.unsub(); } catch (e) {} S.unsub = null; }
+    if (S.metaUnsub) { try { S.metaUnsub(); } catch (e) {} S.metaUnsub = null; }
     S.party = party;
     S.docs = new Map();
     S.stale = false;
+    S.partyMeta = null;
     lsSet("strigula-party", party);
     try {
       const u = new URL(location.href);
       if (party) u.searchParams.set("buli", party); else u.searchParams.delete("buli");
       history.replaceState(null, "", u.toString());
     } catch (e) {}
-    if (party) subscribe();
+    if (party) {
+      rememberParty(party, { at: Date.now() });
+      subscribe();
+      watchMeta();
+    }
   }
-  function switchParty() {
+  function switchParty(fresh) {
     flushAll();
     S.myDoc = null;
     S.readOnly = false;
     setParty(null);
+    S.onboardNew = !!fresh;
     goOnboard();
     renderAll();
   }
@@ -359,11 +448,12 @@
     S.writeTimer = null;
     S.myDoc = null;
     S.backend.deletePlayer(party, S.myId).catch(() => toast("Nem sikerült törölni. Nézd meg a netet, és próbáld újra."));
+    forgetParty(party);
     goOnboard();
     renderAll();
     toast("Kiléptél ebből a buliból.");
   }
-  async function join(rawName, rawCode, msg, btn) {
+  async function join(rawName, rawCode, rawPartyName, msg, btn) {
     const name = cleanName(rawName);
     const party = cleanParty(rawCode);
     const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
@@ -382,6 +472,23 @@
       return;
     }
     if (S.party !== party) return;
+    if (rawPartyName != null) {
+      const pn = cleanPartyName(rawPartyName) || defaultPartyName();
+      let meta;
+      try { meta = typeof S.backend.getPartyMeta === "function" ? await S.backend.getPartyMeta(party) : undefined; }
+      catch (e) { meta = undefined; if (errCode(e) === "permission-denied") toast("A buli nevéhez frissíteni kell a Firestore szabályokat."); }
+      if (S.party !== party) return;
+      if (meta === null) {
+        const now = Date.now();
+        S.partyMeta = { name: pn, createdAt: now };
+        rememberParty(party, { name: pn, created: now });
+        S.backend.setPartyMeta(party, { name: pn, createdAt: now, updatedAt: now }).catch(() => {});
+      } else if (meta === undefined) {
+        rememberParty(party, { name: pn });
+      }
+    }
+    S.onboardNew = false;
+    rememberParty(party, { at: Date.now() });
     const doc = sanitize(existing || {});
     doc.name = name;
     doc.updatedAt = Date.now();
@@ -469,8 +576,32 @@
   }
 
   /* ---------- rendering ---------- */
-  function renderAll() {
+  let partyBtnEl = null;
+  function partyButton() {
+    if (partyBtnEl) return partyBtnEl;
+    partyBtnEl = el("button", { type: "button", class: "party-btn cond", hidden: true, onclick: () => openSheet({ type: "parties" }) },
+      el("span", { class: "pb-name" }));
+    const chev = el("span", { class: "pb-chev", "aria-hidden": "true" });
+    chev.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+    partyBtnEl.append(chev);
+    const brand = document.querySelector(".brand");
+    if (brand) brand.append(partyBtnEl);
+    return partyBtnEl;
+  }
+  function renderHeader() {
     $("#settingsBtn").hidden = S.phase !== "ready";
+    const show = S.phase === "ready" && !!S.party;
+    const pb = partyButton();
+    const h1 = document.querySelector(".brand h1");
+    pb.hidden = !show;
+    if (h1) h1.hidden = show;
+    if (show) {
+      pb.querySelector(".pb-name").textContent = partyTitle();
+      pb.setAttribute("aria-label", "Buli: " + partyTitle() + ". Bulijaim megnyitása");
+    }
+  }
+  function renderAll() {
+    renderHeader();
     renderTabs();
     renderMain();
     renderSheet();
@@ -630,9 +761,15 @@
     const sec = el("section");
     const people = [...allPeople().entries()].sort(byName);
     sec.append(el("h2", { class: "view-title cond", text: people.length ? people.length + " fő a buliban" : "Még senki sincs itt" }));
-    sec.append(el("p", { class: "muted" }, "A buli kódja: ", el("span", { class: "code", text: S.party || "" })));
+    sec.append(el("p", { class: "muted" }, "A buli kódja: ", el("span", { class: "code", text: S.party || "" }),
+      S.partyMeta && S.partyMeta.createdAt ? ". Indult: " + fmtDate(S.partyMeta.createdAt) : null));
     sec.append(el("div", { class: "top-actions" },
       el("button", { type: "button", class: "btn secondary", onclick: invite }, "Barátok meghívása")));
+    const pc = emptyCounts();
+    for (const [, d] of people) for (const c of CATS) pc[c.id] += catTotal(d, c);
+    sec.append(el("section", { class: "stats first" },
+      el("h3", { class: "feed-title cond", text: "Ezen a bulin együtt" }),
+      el("div", { class: "stat-grid one" }, statCard(partyTitle(), pc))));
     const ul = el("ul", { class: "people" });
     for (const [id, d] of people) {
       const me = id === S.myId;
@@ -703,18 +840,39 @@
     code.value = S.party || "";
     const btn = el("button", { type: "button", class: "btn big wide" }, "Belépek a buliba");
     const msg = el("p", { id: "joinMsg", class: "msg", role: "status" });
-    const go = () => join(name.value, code.value, msg, btn);
+    const pname = el("input", { id: "partyNameInput", class: "field", type: "text", maxlength: PARTY_NAME_MAX, autocomplete: "off",
+      enterkeyhint: "go", placeholder: "pl. Szilveszter 2026" });
+    const pnameWrap = el("div", { class: "stack", hidden: !S.onboardNew },
+      el("label", { class: "lbl", for: "partyNameInput", text: "A buli neve" }), pname,
+      el("p", { class: "hint", text: "Később a Beállításokban át is nevezheted." }));
+    if (S.onboardNew && !code.value) code.value = newPartyCode();
+    const go = () => join(name.value, code.value, pnameWrap.hidden ? null : pname.value, msg, btn);
+    pname.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
     btn.addEventListener("click", go);
     name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); code.focus(); } });
     code.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
     const fresh = el("button", { type: "button", class: "link-btn",
-      onclick: () => { code.value = newPartyCode(); msg.textContent = "Új buli kód kész. Belépés után a Mindenki fülön tudod elküldeni a barátaidnak."; msg.classList.remove("err"); } },
+      onclick: () => {
+        code.value = newPartyCode();
+        pnameWrap.hidden = false;
+        const hint = document.getElementById("partyHint");
+        if (hint) hint.textContent = "";
+        msg.textContent = "Új buli kód kész. Adj nevet a bulinak, és lépj be. Utána a Mindenki fülön tudod elküldeni a barátaidnak.";
+        msg.classList.remove("err");
+        try { pname.focus(); } catch (e) {}
+      } },
       "Új bulit indítok, kérek egy kódot");
     sec.append(el("div", { class: "stack" },
       el("label", { class: "lbl", for: "nameInput", text: "A neved" }), name,
       el("label", { class: "lbl", for: "codeInput", text: "A buli kódja" }), code,
       el("p", { class: "hint", text: "Ha linkkel kaptad, már ki van töltve." }),
+      el("p", { id: "partyHint", class: "party-hint", text: S.onboardNew ? "" : partyHintText() }),
+      pnameWrap,
       btn), msg, fresh);
+    const saved = loadParties().filter(p => p.code !== S.party);
+    if (saved.length) {
+      sec.append(el("button", { type: "button", class: "link-btn", onclick: () => openSheet({ type: "parties" }) }, "Korábbi bulijaim"));
+    }
     return sec;
   }
 
@@ -734,6 +892,9 @@
     if (sheet.type === "detail") {
       panel.style.setProperty("--c", "var(--" + sheet.cid + ")");
       if (sheet.pid === S.myId && S.myDoc && !S.readOnly) panel.append(addForm(sheet.cid));
+    } else if (sheet.type === "parties") {
+      title.textContent = "Bulijaim";
+      body.append(partiesBody());
     } else if (sheet.type === "settings") {
       title.textContent = "Beállítások";
       body.append(settingsBody());
@@ -814,6 +975,31 @@
       el("label", { class: "lbl", for: "customInput", text: "Nincs a listán? Írd be, és felírom:" }),
       el("div", { class: "add-inline" }, input, btn));
   }
+  function partiesBody() {
+    const wrap = el("div", { class: "settings" });
+    const list = loadParties();
+    if (!list.length) wrap.append(el("p", { class: "muted", text: "Még nincs elmentett bulid ezen a telefonon." }));
+    const ul = el("ul", { class: "party-list" });
+    for (const p of list) {
+      const cur = p.code === S.party && S.phase === "ready";
+      const title = (p.code === S.party && S.partyMeta && S.partyMeta.name) || p.name || p.code;
+      const when = p.created ? "Indult: " + fmtDate(p.created) : (p.at ? "Utoljára megnyitva: " + fmtDate(p.at) : "");
+      const li = el("li", { class: "party-item" + (cur ? " on" : "") });
+      li.append(el("button", { type: "button", class: "party-open", "aria-current": cur ? "true" : null, onclick: () => openParty(p.code) },
+        el("span", { class: "pi-name", text: title }),
+        el("span", { class: "pi-sub", text: (cur ? "Most itt vagy. " : "") + when })));
+      if (!cur) {
+        li.append(el("button", { type: "button", class: "del", "aria-label": title + " levétele a listáról",
+          onclick: () => { forgetParty(p.code); li.remove(); } }, "×"));
+      }
+      ul.append(li);
+    }
+    wrap.append(ul,
+      el("button", { type: "button", class: "btn wide", onclick: () => { closeSheet(); switchParty(true); } }, "Új buli indítása"),
+      el("button", { type: "button", class: "btn secondary wide", onclick: () => { closeSheet(); switchParty(false); } }, "Belépés kóddal"),
+      el("p", { class: "stat-note", text: "Egy bulira koppintva visszamész, és megnézheted, ki mennyit ivott ott. A lista ezen a telefonon tárolódik; az × csak innen veszi le, a buli megmarad." }));
+    return wrap;
+  }
   function settingsBody() {
     const wrap = el("div", { class: "settings" });
     if (S.myDoc && !S.readOnly) {
@@ -835,6 +1021,20 @@
       input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSave(); } });
       wrap.append(el("div", {}, el("label", { class: "lbl", for: "setName", text: "A neved a buliban" }), el("div", { class: "add-inline" }, input, save)));
     }
+    if (S.party) {
+      const pinput = el("input", { id: "setParty", class: "field", type: "text", maxlength: PARTY_NAME_MAX, autocomplete: "off",
+        enterkeyhint: "done", placeholder: "pl. Szilveszter 2026" });
+      pinput.value = S.partyMeta && S.partyMeta.name ? S.partyMeta.name : "";
+      const psave = el("button", { type: "button", class: "btn" }, "Mentés");
+      const doPSave = () => {
+        if (!savePartyName(pinput.value)) { pinput.focus(); return; }
+        pinput.blur();
+        toast("A buli neve elmentve.");
+      };
+      psave.addEventListener("click", doPSave);
+      pinput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doPSave(); } });
+      wrap.append(el("div", {}, el("label", { class: "lbl", for: "setParty", text: "A buli neve" }), el("div", { class: "add-inline" }, pinput, psave)));
+    }
     wrap.append(
       el("p", { class: "muted" }, "A buli kódja: ", el("span", { class: "code", text: S.party || "" })),
       el("button", { type: "button", class: "btn wide", onclick: invite }, "Barátok meghívása"));
@@ -843,9 +1043,7 @@
         onclick: () => confirmSheet("Nullázod a saját számlálóidat. A többiekét ez nem érinti.", "Nullázom", resetMine) }, "Saját számlálóim nullázása"));
     }
     wrap.append(
-      el("h3", { class: "settings-sub cond", text: "Új buli" }),
-      el("p", { class: "muted", text: "Új bulihoz kérj új kódot, és küldd el a linket a többieknek. Ez a buli megmarad, a kódjával bármikor visszajöhetsz." }),
-      el("button", { type: "button", class: "btn secondary wide", onclick: () => { closeSheet(); switchParty(); } }, "Másik buli vagy új kód"));
+      el("button", { type: "button", class: "btn secondary wide", onclick: () => openSheet({ type: "parties" }) }, "Bulijaim és új buli"));
     if (S.myDoc) {
       wrap.append(el("button", { type: "button", class: "btn danger wide",
         onclick: () => confirmSheet("Kilépsz ebből a buliból, és a számlálóid törlődnek belőle.", "Kilépek", leaveParty) }, "Kilépek ebből a buliból"));

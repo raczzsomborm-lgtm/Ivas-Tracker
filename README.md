@@ -45,7 +45,11 @@ Ezek az adatok nem titkosak, nyugodtan lehetnek nyilvános helyen: a védelmet a
 - A **Mindenki** fülön a **Barátok meghívása** gombbal elküldheted a linket; aki megnyitja, annak a kód már ki van töltve.
 - A **+1** gomb az adott kategóriában az utoljára választott italt írja fel. Egy sorra koppintva fajtánként vezetheted, javíthatsz (−), és saját italt is felvehetsz.
 - Elkoppintás után 5 másodpercig ott a **Visszavonás**.
-- Új buli: **Beállítások → Másik buli vagy új kód**. A régi buli megmarad, a kódjával vissza lehet menni.
+- **Bulik elnevezése:** új bulinál megadhatod a nevét (például „Szilveszter 2026”), később a Beállításokban át is nevezheted.
+  A név fent, a fejlécben látszik, és mindenkinél ugyanaz.
+- **Bulijaim:** a fejlécben a buli nevére koppintva látod a korábbi bulijaidat. Egyre koppintva visszamész,
+  és megnézheted, ki mennyit ivott ott; a Mindenki fülön az „Ezen a bulin együtt” rész a közös összeget mutatja.
+  Innen indíthatsz új bulit is. A lista azon a telefonon tárolódik, ahol a bulit megnyitottad.
 - Gyenge térerőnél is felírhatsz: az app elmenti, és amint visszajön a net, elküldi.
 - **Statisztika:** a saját füleden alul látod, mennyit ittál idén és összesen, az összes bulidból összeadva.
   A Mindenki fülön ugyanez van mindenkire együtt. A nullázás, a buliváltás és a kilépés ezt nem törli.
@@ -53,9 +57,11 @@ Ezek az adatok nem titkosak, nyugodtan lehetnek nyilvános helyen: a védelmet a
 
 ## Ha már feltöltötted egy korábbi változatot
 
-1. Töltsd fel újra az `index.html`, `app.js` és `backend.js` fájlt (GitHubon: a fájlra kattintva ceruza, vagy Add file → Upload files, ugyanazzal a névvel felülírja).
+1. Töltsd fel újra a fájlokat: GitHubon **Add file → Upload files**, és húzd be újra a mappa teljes tartalmát.
+   Az azonos nevű fájlokat a GitHub felülírja.
 2. A Firebase konzolban a Firestore **Rules** fülén cseréld le a szabályokat az új `firestore.rules` tartalmára, és **Publish**.
-   Ha ezt kihagyod, a számlálók működnek, de a statisztika helyén az app szól, hogy frissíteni kell a szabályokat.
+   Ha ezt kihagyod, a számlálók működnek, de a statisztikánál és a buli elnevezésénél az app szól, hogy frissíteni kell a szabályokat.
+3. A GitHub Pages pár percig még a régi fájlokat adhatja. Ha nem látod a változást, zárd be teljesen az appot, és néhány perc múlva nyisd meg újra.
 
 ## Költség
 
