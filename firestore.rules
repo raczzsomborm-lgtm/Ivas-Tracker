@@ -6,7 +6,7 @@ service cloud.firestore {
     // Ide írd a saját fiókazonosítódat (UID). Az appban: Beállítások, Fiók, Fiókazonosító.
     // Amíg itt a minta szöveg áll, senkinek nincs tulajdonosi joga.
     function ownerUid() {
-      return 'IDE_JON_A_SAJAT_UID';
+      return '3hTaBCw1TYdBJt4mfVm3w0mEm7y1';
     }
 
     // Valódi fiókkal (felhasználónév + jelszó) belépett felhasználó.
