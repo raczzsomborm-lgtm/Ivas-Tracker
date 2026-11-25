@@ -16,8 +16,8 @@ window.STRIGULA_FIREBASE = {
   és egy elérhetőséget (például e-mail-címet), ahol a barátaid az adataikkal kapcsolatban elérnek.
 */
 window.MASNAPLO_PRIVACY = {
-  controller: "IDE_JON_A_NEVED",
-  contact: "IDE_JON_AZ_ELERHETOSEGED"
+  controller: "Rácz Zsombor Marcell",
+  contact: "racz.zsombor.marcell@gmail.com"
 };
 
 /*
@@ -25,4 +25,4 @@ window.MASNAPLO_PRIVACY = {
   Ugyanezt kell beírni a firestore.rules fájl elején lévő ownerUid() részbe is, és ott Publish-olni.
   Ez itt csak a Tulajdonos menüt jeleníti meg; a jogot a szerver adja a szabályok alapján.
 */
-window.MASNAPLO_OWNER_UID = "IDE_JON_A_SAJAT_UID";
+window.MASNAPLO_OWNER_UID = "3hTaBCw1TYdBJt4mfVm3w0mEm7y1";
