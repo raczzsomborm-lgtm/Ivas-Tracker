@@ -121,7 +121,7 @@
     started: false, backend: null, myId: null,
     username: "", usernameKey: "", legacy: false, authMode: "signup", pickMsg: "",
     email: "", emailReal: false, emailVerified: false,
-    isOwner: false, ownerUntil: 0, bans: new Set(), banned: false,
+    isOwner: false, ownerUntil: 0, bans: new Set(), banned: false, privParties: null,
     party: null, unsub: null, metaUnsub: null, votesUnsub: null,
     docs: new Map(), votes: new Map(), myDoc: null, partyMeta: null,
     stale: false, errorCode: "", readOnly: false, votesError: false,
@@ -165,7 +165,38 @@
     list.sort((a, b) => b.at - a.at);
     saveParties(list);
   }
-  function forgetParty(code) { saveParties(loadParties().filter(p => p.code !== code)); }
+  function loadHidden() {
+    try { const a = JSON.parse(lsGet("strigula-hidden-parties") || "[]"); return new Set(Array.isArray(a) ? a.filter(x => typeof x === "string") : []); }
+    catch (e) { return new Set(); }
+  }
+  function saveHidden(set) { lsSet("strigula-hidden-parties", JSON.stringify([...set].slice(-200))); }
+  // Levétel a listáról: csak ezen a telefonon, és a szerverről sem töltjük vissza.
+  function forgetParty(code) {
+    saveParties(loadParties().filter(p => p.code !== code));
+    const h = loadHidden(); h.add(code); saveHidden(h);
+  }
+  function unhideParty(code) {
+    const h = loadHidden();
+    if (h.delete(code)) saveHidden(h);
+  }
+  // Belépés után a szerveren tárolt bulikat visszatesszük a listába (pl. újratelepítés után).
+  function restoreParties() {
+    const srv = S.privParties;
+    if (!srv || typeof srv !== "object") return;
+    const hidden = loadHidden();
+    const local = new Set(loadParties().map(p => p.code));
+    const missing = Object.entries(srv)
+      .filter(([c]) => cleanParty(c) === c && !local.has(c) && !hidden.has(c))
+      .sort((a, b) => num(b[1]) - num(a[1]))
+      .slice(0, 40);
+    if (!missing.length) return;
+    for (const [c, t] of missing) rememberParty(c, { at: num(t) });
+    if (typeof S.backend.getPartyMeta !== "function") return;
+    Promise.all(missing.map(([c]) => Promise.resolve().then(() => S.backend.getPartyMeta(c)).then((m) => {
+      const name = m && typeof m.name === "string" ? cleanPartyName(m.name) : "";
+      if (name) rememberParty(c, { name, created: num(m.createdAt) });
+    }).catch(() => {}))).then(() => { if (S.drawerOpen) { closeDrawer(); openDrawer(); } });
+  }
   function partyTitle() {
     if (S.partyMeta && S.partyMeta.name) return S.partyMeta.name;
     const saved = loadParties().find(p => p.code === S.party);
@@ -524,6 +555,7 @@
       history.replaceState(null, "", u.toString());
     } catch (e) {}
     if (party) {
+      unhideParty(party);
       rememberParty(party, { at: Date.now() });
       subscribe();
       watchMeta();
@@ -935,6 +967,7 @@
   }
   function startData() {
     S.phase = "loading";
+    restoreParties();
     subscribeStats();
     if (S.isOwner && typeof S.backend.watchBans === "function") {
       try { S.backend.watchBans((ids) => { S.bans = new Set(ids); if (S.sheet && (S.sheet.type === "owner" || S.sheet.type === "ownerUser")) renderAll(); }, () => {}); } catch (e) {}
@@ -974,14 +1007,12 @@
     if (n > MAX) box.append(el("span", { class: "tally-more cond", text: "+" + (n - MAX) }));
     return box;
   }
-  function heroTally() {
-    const svg = svgEl("svg", { viewBox: "0 0 72 56", width: 92, height: 72, class: "hero-tally", "aria-hidden": "true" });
-    [["12", "6", "12", "50", "var(--shot)"], ["27", "6", "27", "50", "var(--wine)"],
-     ["42", "6", "42", "50", "var(--beer)"], ["57", "6", "57", "50", "var(--water)"],
-     ["3", "42", "69", "14", "currentColor"]].forEach((s, i) => {
-      svg.append(svgEl("line", { x1: s[0], y1: s[1], x2: s[2], y2: s[3], class: "draw",
-        style: "stroke:" + s[4] + ";animation-delay:" + (i * 0.12) + "s" }));
-    });
+  function heroMark() {
+    const svg = svgEl("svg", { viewBox: "0 0 512 512", width: 96, height: 96, class: "hero-mark", "aria-hidden": "true" });
+    svg.append(
+      svgEl("rect", { width: 512, height: 512, rx: 112, fill: "#18231F" }),
+      svgEl("path", { class: "echo", fill: "#F2A24E", d: "M144,380 L144,156 L208,156 L268,272 L328,156 L392,156 L392,380 L338,380 L338,258 L288,352 L248,352 L198,258 L198,380 Z" }),
+      svgEl("path", { fill: "#ECEDE4", d: "M124,360 L124,136 L188,136 L248,252 L308,136 L372,136 L372,360 L318,360 L318,238 L268,332 L228,332 L178,238 L178,360 Z" }));
     return svg;
   }
 
@@ -1415,7 +1446,7 @@
     const mode = S.authMode === "login" || S.authMode === "reset" ? S.authMode : "signup";
     const signup = mode === "signup";
     const sec = el("section", { class: "onboard auth" });
-    sec.append(heroTally());
+    sec.append(heroMark());
     const heads = {
       signup: ["Szia!", "Hozz létre egy fiókot. Egy egyedi felhasználónév és egy jelszó kell hozzá, az e-mail-cím nem kötelező."],
       login: ["Üdv újra!", "Lépj be a felhasználóneveddel vagy, ha megadtál, az e-mail-címeddel."],
@@ -1565,7 +1596,7 @@
   }
   function joinView() {
     const sec = el("section", { class: "onboard" });
-    sec.append(heroTally());
+    sec.append(heroMark());
     sec.append(el("h2", { class: "hero cond", text: "Ki iszik ma?" }));
     sec.append(el("p", { class: "lead", text: "Szia, " + S.username + "! Lépj be egy buliba a kódjával, vagy indíts újat." }));
     const code = el("input", { id: "codeInput", class: "field big", type: "text", maxlength: 40, autocomplete: "off",
@@ -2165,6 +2196,7 @@
       try {
         const priv = await backend.getPrivate();
         consentOk = !!(priv && priv.consent && priv.consent.v === CONSENT_V);
+        S.privParties = priv && priv.parties && typeof priv.parties === "object" ? priv.parties : null;
       } catch (e) {
         console.error(e);
         if (errCode(e) === "permission-denied") { S.phase = "rulesold"; renderAll(); return; }

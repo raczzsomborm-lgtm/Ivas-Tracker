@@ -23,6 +23,18 @@ Ha még az adatvédelmi frissítés előtti változatról jössz, a `config.js` 
 és egy elérhetőséget, és ellenőrizd, hogy a Firebase-ben az **Authentication → Settings → User actions** alatt az
 **Enable deletion** be van-e kapcsolva.
 
+## Új logó és név a telefonon
+
+1. **GitHub:** töltsd fel a mappa teljes tartalmát (**Add file → Upload files**). A régi ikonfájlokat
+   (`icons/icon-192.png`, `icons/icon-512.png`, `icons/icon-maskable-512.png`, `icons/apple-touch-icon.png`)
+   törölheted, már nem használja őket semmi.
+2. **Telefon:** a kezdőképernyőn lévő app nevét és ikonját a telefon a hozzáadáskor menti el, ezért egyszer
+   le kell venni és újra kitenni:
+   - **iPhone:** hosszan nyomd az ikont → App eltávolítása → Törlés a kezdőképernyőről. Safariban nyisd meg a linket →
+     Megosztás → Főképernyőhöz adás. Ezután újra be kell lépni; a bulilista a szerverről magától visszajön.
+   - **Android:** hosszan nyomd az ikont → Eltávolítás. Chrome-ban nyisd meg a linket → ⋮ → Alkalmazás telepítése.
+     A Chrome néha magától is frissíti a nevet és az ikont, de ez akár napokig is eltarthat.
+
 ## Tulajdonosi menü beállítása (egyszer kell)
 
 1. Az appban: **☰ → Beállítások → Fiók → Fiókazonosító (UID) → Másolás.**
@@ -85,6 +97,8 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
 ## Használat
 
 - **Menü (☰):** fogaskerék és „Beállítások”, alatta vékony csík után a korábbi bulijaid (görgethető lista).
+  A lista belépéskor a szerverről is kiegészül, így új telefonon vagy újratelepítés után is megvannak a bulijaid.
+  Amit az × gombbal leveszel, az azon a telefonon nem jön vissza, amíg újra be nem lépsz abba a buliba.
   Egy bulira koppintva megnyílik, és látod, ki mennyit ivott ott. Itt indíthatsz új bulit is.
 - **Beállítások:** mértékegység (metrikus vagy imperial), felhasználónév, kijelentkezés,
   és az aktuális buli dolgai (név, meghívás, nullázás, kilépés).
