@@ -108,6 +108,50 @@ function hand(backend, problem) {
   const playerRef = (party, uid) => fs.doc(db, "parties", party, "players", uid);
   const voteRef = (party, uid) => fs.doc(db, "parties", party, "votes", uid || user.uid);
   const err = (code, msg) => { const e = new Error(msg || code); e.code = code; return e; };
+  const bannedRef = (uid) => fs.doc(db, "banned", uid);
+  const logRef = () => fs.doc(fs.collection(db, "adminlog"));
+  const logEntry = (action, target, party, detail) => {
+    const e = { at: Date.now(), action };
+    if (target) e.target = target;
+    if (party) e.party = party;
+    if (detail) e.detail = String(detail).slice(0, 300);
+    return e;
+  };
+  const CAT_IDS = ["shot", "wine", "beer", "water"];
+  // Tulajdonosi számláló-javítás egy résztvevő dokumentumán. Visszaadja a darabszám-változásokat kategóriánként.
+  function applyOwnerOps(data, ops) {
+    const out = { v: 1, name: data.name, cats: {}, recent: Array.isArray(data.recent) ? data.recent.slice(0, 8) : [], updatedAt: Date.now() };
+    const changes = {};
+    for (const cid of CAT_IDS) {
+      const c = data.cats && data.cats[cid] && typeof data.cats[cid] === "object" ? data.cats[cid] : {};
+      out.cats[cid] = {
+        items: (Array.isArray(c.items) ? c.items : []).filter((i) => i && typeof i.name === "string" && Number(i.n) > 0).map((i) => ({ name: i.name, n: Math.floor(Number(i.n)) })),
+        custom: Array.isArray(c.custom) ? c.custom.filter((x) => typeof x === "string").slice(0, 30) : [],
+        quick: typeof c.quick === "string" ? c.quick : null,
+      };
+    }
+    for (const op of ops) {
+      if (op.type === "reset") {
+        for (const cid of CAT_IDS) {
+          const sum = out.cats[cid].items.reduce((a, i) => a + i.n, 0);
+          if (sum) changes[cid] = (changes[cid] || 0) - sum;
+          out.cats[cid].items = [];
+        }
+        out.recent = [];
+      } else if (op.type === "bump" && CAT_IDS.includes(op.cid) && typeof op.name === "string" && op.name) {
+        const c = out.cats[op.cid];
+        let it = c.items.find((i) => i.name === op.name);
+        const cur = it ? it.n : 0;
+        const next = Math.max(0, Math.min(9999, cur + (op.delta > 0 ? 1 : -1)));
+        if (next === cur) continue;
+        if (!it) { it = { name: op.name, n: 0 }; c.items.push(it); }
+        it.n = next;
+        if (next === 0) c.items = c.items.filter((i) => i !== it);
+        changes[op.cid] = (changes[op.cid] || 0) + (next - cur);
+      }
+    }
+    return { out, changes };
+  }
 
   // Felhasználónév-rekord: e-mail nélküli fióknál a belső cím, e-mailes fióknál csak egy jelzés.
   function mappingFor(u, username, extra) {
@@ -294,6 +338,114 @@ function hand(backend, problem) {
     async signOut() {
       try { await Promise.race([fs.waitForPendingWrites(db), new Promise((r) => setTimeout(r, 3000))]); } catch (e) {}
       await authMod.signOut(auth);
+    },
+
+    async isBanned() {
+      const s = await fs.getDoc(bannedRef(user.uid));
+      return s.exists();
+    },
+
+    /* ----- tulajdonosi műveletek: a szerver csak a tulajdonos fiókjának, friss jelszó után engedi ----- */
+    async ownerUnlock(password) {
+      const u = await reauth(password);
+      await u.getIdToken(true);
+    },
+    watchBans(next, onError) {
+      return fs.onSnapshot(fs.collection(db, "banned"),
+        (snap) => next(snap.docs.map((d) => d.id)),
+        (e) => onError(e));
+    },
+    async adminLog(limit) {
+      const q = fs.query(fs.collection(db, "adminlog"), fs.orderBy("at", "desc"), fs.limit(limit || 20));
+      const snap = await fs.getDocs(q);
+      return snap.docs.map((d) => d.data());
+    },
+    async adminRename(uid, username, key, oldKey) {
+      const target = await fs.getDoc(nameRef(key));
+      if (target.exists() && target.data().uid !== uid) throw err("app/taken");
+      let old = null;
+      if (oldKey) { const s = await fs.getDoc(nameRef(oldKey)); if (s.exists() && s.data().uid === uid) old = s.data(); }
+      const m = { uid, username, createdAt: Date.now() };
+      if (old && typeof old.email === "string") m.email = old.email;
+      else if (old && old.hasEmail) m.hasEmail = true;
+      if (old && old.emailPending) m.emailPending = true;
+      if (!old && target.exists()) {
+        const t = target.data();
+        if (typeof t.email === "string") m.email = t.email; else if (t.hasEmail) m.hasEmail = true;
+      }
+      const batch = fs.writeBatch(db);
+      batch.set(nameRef(key), m);
+      if (old && oldKey !== key) batch.delete(nameRef(oldKey));
+      batch.set(userRef(uid), { username, usernameKey: key, updatedAt: Date.now() }, { merge: true });
+      batch.set(logRef(), logEntry("rename", uid, null, (old ? old.username : "?") + " → " + username));
+      await batch.commit();
+    },
+    async adminBan(uid, on, label) {
+      const batch = fs.writeBatch(db);
+      if (on) batch.set(bannedRef(uid), { at: Date.now() });
+      else batch.delete(bannedRef(uid));
+      batch.set(logRef(), logEntry(on ? "ban" : "unban", uid, null, label));
+      await batch.commit();
+    },
+    async adminWipe(uid, extraParties, label) {
+      const codes = new Set(extraParties || []);
+      const p = await fs.getDoc(privRef(uid));
+      if (p.exists() && p.data().parties && typeof p.data().parties === "object") Object.keys(p.data().parties).forEach((c) => codes.add(c));
+      let key = null;
+      const prof = await fs.getDoc(userRef(uid));
+      if (prof.exists()) key = prof.data().usernameKey || null;
+      const refs = [];
+      for (const c of codes) if (typeof c === "string" && /^[a-z0-9-]{3,40}$/.test(c)) refs.push(playerRef(c, uid), voteRef(c, uid));
+      if (key) { const m = await fs.getDoc(nameRef(key)); if (m.exists() && m.data().uid === uid) refs.push(nameRef(key)); }
+      refs.push(userRef(uid), privRef(uid));
+      let first = true;
+      for (let i = 0; i < refs.length; i += 400) {
+        const b = fs.writeBatch(db);
+        refs.slice(i, i + 400).forEach((r) => b.delete(r));
+        if (first) { b.set(logRef(), logEntry("wipe", uid, null, label)); first = false; }
+        await b.commit();
+      }
+    },
+    async adminEditPlayer(party, uid, ops, statsDay, label) {
+      await fs.runTransaction(db, async (tx) => {
+        const ref = playerRef(party, uid);
+        const snap = await tx.get(ref);
+        if (!snap.exists()) throw err("app/no-player");
+        const { out, changes } = applyOwnerOps(snap.data(), ops);
+        tx.set(ref, out);
+        const cats = Object.keys(changes).filter((c) => changes[c]);
+        if (cats.length && /^\d{4}-\d{2}-\d{2}$/.test(statsDay)) {
+          const y = statsDay.slice(0, 4);
+          const inc = {};
+          for (const c of cats) inc[c] = fs.increment(changes[c]);
+          tx.set(userRef(uid), { total: inc, years: { [y]: inc }, days: { [statsDay]: inc }, updatedAt: Date.now() }, { merge: true });
+        }
+        tx.set(logRef(), logEntry(ops.some((o) => o.type === "reset") ? "reset" : "edit", uid, party, label));
+      });
+    },
+    async adminClearVotesAbout(party, subject, label) {
+      const snap = await fs.getDocs(fs.collection(db, "parties", party, "votes"));
+      const batch = fs.writeBatch(db);
+      for (const d of snap.docs) {
+        const on = d.data().on;
+        if (on && typeof on === "object" && subject in on) batch.set(d.ref, { on: { [subject]: fs.deleteField() }, updatedAt: Date.now() }, { merge: true });
+      }
+      batch.set(logRef(), logEntry("clearvotes", subject, party, label));
+      await batch.commit();
+    },
+    async adminDeleteParty(party, label) {
+      const [players, votes] = await Promise.all([
+        fs.getDocs(fs.collection(db, "parties", party, "players")),
+        fs.getDocs(fs.collection(db, "parties", party, "votes")),
+      ]);
+      const refs = [...players.docs.map((d) => d.ref), ...votes.docs.map((d) => d.ref), fs.doc(db, "parties", party)];
+      let first = true;
+      for (let i = 0; i < refs.length; i += 400) {
+        const b = fs.writeBatch(db);
+        refs.slice(i, i + 400).forEach((r) => b.delete(r));
+        if (first) { b.set(logRef(), logEntry("deleteparty", null, party, label)); first = false; }
+        await b.commit();
+      }
     },
 
     /* ----- egy buli résztvevői ----- */

@@ -2,31 +2,71 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ===== A TULAJDONOS =====
+    // Ide írd a saját fiókazonosítódat (UID). Az appban: Beállítások, Fiók, Fiókazonosító.
+    // Amíg itt a minta szöveg áll, senkinek nincs tulajdonosi joga.
+    function ownerUid() {
+      return 'IDE_JON_A_SAJAT_UID';
+    }
+
     // Valódi fiókkal (felhasználónév + jelszó) belépett felhasználó.
-    // A vendég (anonim) munkamenet ezt nem teljesíti, így fiók nélkül semmi nem látható és nem írható.
-    function member() {
+    function account() {
       return request.auth != null && ('email' in request.auth.token);
+    }
+    function notBanned() {
+      return !exists(/databases/$(database)/documents/banned/$(request.auth.uid));
+    }
+    // Fiókkal rendelkező, nem letiltott felhasználó.
+    function member() {
+      return account() && notBanned();
     }
     function isMe(uid) {
       return member() && request.auth.uid == uid;
     }
+    // A saját adatait egy letiltott felhasználó is törölheti.
+    function isMeAny(uid) {
+      return account() && request.auth.uid == uid;
+    }
+    function isOwner() {
+      return account() && request.auth.uid == ownerUid();
+    }
+    // Tulajdonosi művelet csak akkor, ha a tulajdonos az elmúlt 15 percben újra beírta a jelszavát.
+    function ownerFresh() {
+      return isOwner() && request.auth.token.auth_time * 1000 > request.time.toMillis() - 900000;
+    }
+
     function validUsername(key, u) {
       return u is string
         && u.matches('^[A-Za-z0-9][A-Za-z0-9_.-]{2,19}$')
         && key == u.lower();
     }
-    function ownsUsername(d) {
+    function ownsUsernameFor(uid, d) {
       return d.usernameKey is string
-        && getAfter(/databases/$(database)/documents/usernames/$(d.usernameKey)).data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/usernames/$(d.usernameKey)).data.uid == uid
         && getAfter(/databases/$(database)/documents/usernames/$(d.usernameKey)).data.username == d.username;
     }
-    // Felhasználónév-rekord: e-mail nélküli fióknál a belső belépési cím, e-mailes fióknál csak egy jelzés,
-    // így a valódi e-mail-cím soha nem kerül ide.
+    function mappingKeysOk(d) {
+      return d.keys().hasOnly(['uid', 'email', 'username', 'createdAt', 'hasEmail', 'emailPending']);
+    }
+    // Felhasználónév-rekord: e-mail nélküli fióknál a belső belépési cím, e-mailes fióknál csak egy jelzés.
     function validMapping(key, d) {
-      return d.keys().hasOnly(['uid', 'email', 'username', 'createdAt', 'hasEmail', 'emailPending'])
+      return mappingKeysOk(d)
         && d.uid == request.auth.uid
         && (!('email' in d) || d.email == request.auth.token.email)
         && validUsername(key, d.username);
+    }
+    function validMappingByOwner(key, d) {
+      return mappingKeysOk(d)
+        && d.uid is string
+        && (!('email' in d) || d.email is string)
+        && validUsername(key, d.username);
+    }
+    function validUserDoc(uid, d) {
+      return d.keys().hasOnly(['v', 'total', 'years', 'days', 'username', 'usernameKey', 'updatedAt'])
+        && (!('total' in d) || d.total is map)
+        && (!('years' in d) || d.years is map)
+        && (!('days' in d) || d.days is map)
+        && (!('username' in d) || ownsUsernameFor(uid, d));
     }
     function validPlayer(d) {
       return d.keys().hasOnly(['v', 'name', 'cats', 'recent', 'updatedAt'])
@@ -35,39 +75,36 @@ service cloud.firestore {
         && d.recent is list && d.recent.size() <= 8
         && d.updatedAt is number;
     }
+    function validVotes(d) {
+      return d.keys().hasOnly(['on', 'updatedAt']) && d.on is map;
+    }
 
     // Felhasználónév -> fiók. Egy név csak egyszer létezhet (a dokumentum azonosítója a kisbetűs név).
-    // Belépéskor a vendég munkamenet is lekérdezhet egy nevet, de listázni senki sem tudja őket.
     match /usernames/{key} {
       allow get: if request.auth != null;
       allow list: if false;
-      allow create: if member() && validMapping(key, request.resource.data);
-      allow update: if member() && resource.data.uid == request.auth.uid && validMapping(key, request.resource.data);
-      allow delete: if member() && resource.data.uid == request.auth.uid;
+      allow create: if (member() && validMapping(key, request.resource.data))
+        || (ownerFresh() && validMappingByOwner(key, request.resource.data));
+      allow update: if (member() && resource.data.uid == request.auth.uid && validMapping(key, request.resource.data))
+        || (ownerFresh() && validMappingByOwner(key, request.resource.data));
+      allow delete: if (account() && resource.data.uid == request.auth.uid) || ownerFresh();
     }
 
-    // Profil és statisztika: mindenki láthatja az összesítéshez, de csak a sajátját írhatja,
-    // és csak olyan felhasználónevet tehet bele, ami tényleg az övé.
+    // Profil és statisztika.
     match /users/{uid} {
       allow read: if member() || (request.auth != null && request.auth.uid == uid);
-      allow create, update: if isMe(uid)
-        && request.resource.data.keys().hasOnly(['v', 'total', 'years', 'days', 'username', 'usernameKey', 'updatedAt'])
-        && (!('total' in request.resource.data) || request.resource.data.total is map)
-        && (!('years' in request.resource.data) || request.resource.data.years is map)
-        && (!('days' in request.resource.data) || request.resource.data.days is map)
-        && (!('username' in request.resource.data) || ownsUsername(request.resource.data));
-      allow delete: if isMe(uid);
+      allow create, update: if (isMe(uid) || ownerFresh()) && validUserDoc(uid, request.resource.data);
+      allow delete: if isMeAny(uid) || ownerFresh();
     }
 
-    // Csak a tulajdonos láthatja: a hozzájárulása és azoknak a buliknak a listája, amelyekben részt vett
-    // (ez kell ahhoz, hogy fióktörléskor minden adata törlődjön).
+    // Csak a tulajdonos (és friss jelszóval az app tulajdonosa) láthatja: hozzájárulás és a bulik listája.
     match /private/{uid} {
-      allow read: if isMe(uid);
+      allow read: if isMeAny(uid) || ownerFresh();
       allow create, update: if isMe(uid)
         && request.resource.data.keys().hasOnly(['consent', 'parties', 'updatedAt'])
         && (!('consent' in request.resource.data) || request.resource.data.consent is map)
         && (!('parties' in request.resource.data) || request.resource.data.parties is map);
-      allow delete: if isMe(uid);
+      allow delete: if isMeAny(uid) || ownerFresh();
     }
 
     // A buli neve és kezdete.
@@ -80,22 +117,42 @@ service cloud.firestore {
         && request.resource.data.name.size() <= 40
         && request.resource.data.createdAt is number
         && request.resource.data.updatedAt is number;
+      allow delete: if ownerFresh();
     }
 
-    // Egy buli résztvevői: mindenki csak a saját számlálóját írhatja és törölheti.
+    // Egy buli résztvevői: mindenki csak a sajátját írhatja (a tulajdonos javíthat).
     match /parties/{party}/players/{uid} {
       allow read: if member();
-      allow create, update: if isMe(uid) && validPlayer(request.resource.data);
-      allow delete: if isMe(uid);
+      allow create, update: if (isMe(uid) || ownerFresh()) && validPlayer(request.resource.data);
+      allow delete: if isMeAny(uid) || ownerFresh();
     }
 
-    // Hányás-szavazás: mindenki csak a saját szavazatait írhatja.
+    // Hányás-szavazás: mindenki csak a saját szavazatait írhatja (a tulajdonos törölhet belőlük).
     match /parties/{party}/votes/{uid} {
       allow read: if member();
-      allow create, update: if isMe(uid)
-        && request.resource.data.keys().hasOnly(['on', 'updatedAt'])
-        && request.resource.data.on is map;
-      allow delete: if isMe(uid);
+      allow create, update: if (isMe(uid) || ownerFresh()) && validVotes(request.resource.data);
+      allow delete: if isMeAny(uid) || ownerFresh();
+    }
+
+    // Letiltott fiókok. Az érintett látja a saját letiltását, a tulajdonost nem lehet letiltani.
+    match /banned/{uid} {
+      allow get: if (request.auth != null && request.auth.uid == uid) || isOwner();
+      allow list: if isOwner();
+      allow create, update: if ownerFresh()
+        && uid != ownerUid()
+        && request.resource.data.keys().hasOnly(['at'])
+        && request.resource.data.at is number;
+      allow delete: if ownerFresh();
+    }
+
+    // Tulajdonosi napló: csak bővíthető, az appból se módosítani, se törölni nem lehet.
+    match /adminlog/{id} {
+      allow read: if isOwner();
+      allow create: if ownerFresh()
+        && request.resource.data.keys().hasOnly(['at', 'action', 'target', 'party', 'detail'])
+        && request.resource.data.at is number
+        && request.resource.data.action is string;
+      allow update, delete: if false;
     }
   }
 }

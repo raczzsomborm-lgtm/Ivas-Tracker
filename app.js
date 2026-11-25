@@ -24,7 +24,12 @@
   const FLOZ_ML = 28.4130625;
   const PALETTE = ["#E4572E", "#F3A712", "#3BB273", "#2D9CDB", "#9B5DE5", "#F15BB5", "#00B8A9", "#C0A16B"];
   const SVGNS = "http://www.w3.org/2000/svg";
-  const CONSENT_V = "2026-11-24";
+  const CONSENT_V = "2026-11-24b";
+  const OWNER_UID = (() => {
+    const u = window.MASNAPLO_OWNER_UID;
+    return typeof u === "string" && /^[A-Za-z0-9]{10,64}$/.test(u.trim()) ? u.trim() : "";
+  })();
+  const OWNER_WINDOW_MS = 14 * 60 * 1000;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
   const RULES_MSG = "A Firestore szabályai elavultak. Másold be az új firestore.rules tartalmát a Firebase konzolba (Firestore, Rules), és nyomj Publish-t.";
 
@@ -112,10 +117,11 @@
 
   /* ---------- állapot ---------- */
   const S = {
-    phase: "boot", // boot | auth | pickname | consent | loading | join | ready | error | noconfig | authoff | offline | bootfail | rulesold
+    phase: "boot", // boot | auth | pickname | consent | banned | loading | join | ready | error | noconfig | authoff | offline | bootfail | rulesold
     started: false, backend: null, myId: null,
     username: "", usernameKey: "", legacy: false, authMode: "signup", pickMsg: "",
     email: "", emailReal: false, emailVerified: false,
+    isOwner: false, ownerUntil: 0, bans: new Set(), banned: false,
     party: null, unsub: null, metaUnsub: null, votesUnsub: null,
     docs: new Map(), votes: new Map(), myDoc: null, partyMeta: null,
     stale: false, errorCode: "", readOnly: false, votesError: false,
@@ -902,9 +908,16 @@
       if (S.party !== party) return;
       clearTimeout(timer);
       S.errorCode = errCode(e);
+      if (S.errorCode === "permission-denied") checkBanned();
       if (S.phase === "ready") { S.stale = true; renderAll(); }
       else { S.phase = "error"; renderAll(); }
     });
+  }
+  function checkBanned() {
+    if (!S.backend || typeof S.backend.isBanned !== "function") return;
+    Promise.resolve().then(() => S.backend.isBanned()).then((b) => {
+      if (b && S.phase !== "banned") { closeSheet(); closeDrawer(); S.phase = "banned"; renderAll(); }
+    }).catch(() => {});
   }
   function subscribeStats() {
     if (typeof S.backend.watchStats !== "function") return;
@@ -923,6 +936,9 @@
   function startData() {
     S.phase = "loading";
     subscribeStats();
+    if (S.isOwner && typeof S.backend.watchBans === "function") {
+      try { S.backend.watchBans((ids) => { S.bans = new Set(ids); if (S.sheet && (S.sheet.type === "owner" || S.sheet.type === "ownerUser")) renderAll(); }, () => {}); } catch (e) {}
+    }
     const known = new Set(loadParties().map(p => p.code));
     let urlParty = null;
     try { urlParty = cleanParty(new URLSearchParams(location.search).get("buli")); } catch (e) {}
@@ -973,6 +989,7 @@
   const ICON_MENU = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>';
   const ICON_GEAR = '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
   const ICON_CLOSE = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+  const ICON_SHIELD = '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>';
   const ICON_CHEV = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
   function iconSpan(html, cls) { const s = el("span", { class: cls || "ico", "aria-hidden": "true" }); s.innerHTML = html; return s; }
   function ensureHeader() {
@@ -1044,7 +1061,7 @@
   function messageView(title, text) {
     return el("section", {}, el("h2", { class: "view-title cond", text: title }), el("p", { text }));
   }
-  const STATIC_VIEWS = { auth: () => authView(), pickname: () => pickView(), consent: () => consentView(), join: () => joinView() };
+  const STATIC_VIEWS = { auth: () => authView(), pickname: () => pickView(), consent: () => consentView(), banned: () => bannedView(), join: () => joinView() };
   function renderMain() {
     const main = $("#main");
     if (STATIC_VIEWS[S.phase]) {
@@ -1520,6 +1537,8 @@
       h("Ki látja az adataidat?"),
       para("A többi bejelentkezett felhasználó látja a felhasználónevedet, a bulikon felírt italaidat, a pontjaidat, a statisztikádat és a grafikonodat. Egy buli adatait az láthatja, akinek van fiókja és ismeri a buli kódját. Az e-mail-címedet és a jelszavadat senki más nem látja."),
       para("Adatfeldolgozó a Google (Firebase szolgáltatás). Az adatbázis európai szervereken van; a bejelentkezési adatokat a Google az EU–USA adatvédelmi keretrendszer és szerződéses garanciák alapján az Egyesült Államokban is kezelheti. Az oldal betöltésekor a GitHub (a tárhely) és a Google (betűtípusok, Firebase) a működéshez szükséges technikai adatokat, például az IP-címedet is megkapja."),
+      h("A tulajdonos jogosultságai"),
+      para("Az app tulajdonosa (az adatkezelő) a visszaélések kezelése és a hibák javítása érdekében átnevezhet felhasználókat, javíthatja vagy nullázhatja a számlálókat, törölhet szavazatokat, bulikat és felhasználói adatokat, és letilthat fiókokat. Ehhez a saját fiókjával, a jelszava újbóli megadása után fér hozzá, és minden ilyen műveletet naplózunk. Ehhez a tulajdonos a bulik listáját és a hozzájárulásod időpontját is láthatja. A tulajdonos a Firebase kezelőfelületén keresztül is hozzáfér az adatokhoz."),
       h("Meddig tároljuk?"),
       para("Amíg a fiókod létezik. Ha törlöd a fiókodat, a profilod, a felhasználóneved, a statisztikád, valamint a buli-számlálóid és a szavazataid minden olyan buliból azonnal törlődnek, amelyről az app tud (amelyet bármelyik eszközödön megnyitottál ezzel a fiókkal). Ha egy régebbi buliban mégis maradna adatod, például egy azóta nem használt telefonról, az adatkezelő kérésre törli. A mások által rólad leadott szavazatokban csak egy azonosító marad, ami már senkihez sem köthető. A bulik neve a bulihoz tartozik, ezért az megmarad."),
       h("Milyen jogaid vannak?"),
@@ -1621,6 +1640,8 @@
         close),
       el("button", { type: "button", class: "drawer-item", onclick: () => { closeDrawer(); openSheet({ type: "settings" }); } },
         iconSpan(ICON_GEAR), el("span", { text: "Beállítások" })),
+      S.isOwner ? el("button", { type: "button", class: "drawer-item", onclick: () => { closeDrawer(); openSheet({ type: "owner" }); } },
+        iconSpan(ICON_SHIELD), el("span", { text: "Tulajdonos" })) : null,
       el("hr", { class: "drawer-sep" }),
       el("div", { class: "drawer-sub" },
         el("span", { class: "drawer-title cond", text: "Bulijaim" }),
@@ -1661,6 +1682,12 @@
     } else if (sheet.type === "settings") {
       title.textContent = "Beállítások";
       body.append(settingsBody());
+    } else if (sheet.type === "owner") {
+      title.textContent = "Tulajdonos";
+      body.append(ownerBody());
+    } else if (sheet.type === "ownerUser") {
+      title.textContent = displayName(sheet.uid, S.docs.get(sheet.uid));
+      body.append(ownerUserBody(sheet.uid));
     } else if (sheet.type === "privacy") {
       title.textContent = "Adatkezelési tájékoztató";
       body.append(privacyContent());
@@ -1708,7 +1735,8 @@
     const mine = s.pid === S.myId && !!S.myDoc;
     const doc = mine ? S.myDoc : S.docs.get(s.pid);
     if (!doc || S.phase !== "ready") { closeSheet(); return; }
-    const editable = mine && !S.readOnly;
+    const ownerEdit = !mine && S.isOwner && ownerUnlocked();
+    const editable = (mine && !S.readOnly) || ownerEdit;
     const body = $("#sheetBody");
     const total = catTotal(doc, cat);
     $("#sheetTitle").replaceChildren(
@@ -1718,7 +1746,9 @@
     let list = drinkList(doc, cat);
     if (!editable) list = list.filter(d => d.n > 0).sort((a, b) => b.n - a.n);
     const keep = body.scrollTop;
-    const who = mine ? null : el("p", { class: "muted", text: displayName(s.pid, doc) + " számlálója, csak nézheted." });
+    const who = mine ? null : ownerEdit
+      ? el("p", { class: "note", text: "Tulajdonosként javítod " + displayName(s.pid, doc) + " számlálóját. A statisztikájából is levonja, illetve hozzáadja, és a napló rögzíti." })
+      : el("p", { class: "muted", text: displayName(s.pid, doc) + " számlálója, csak nézheted." });
     if (!list.length) {
       body.replaceChildren(...(who ? [who] : []), el("p", { class: "empty", text: "Ebből még nincs semmi felírva." }));
       return;
@@ -1729,8 +1759,14 @@
       const li = el("li", { class: "drink" + (d.n > 0 ? " has" : "") });
       li.append(el("span", { class: "d-name" },
         el("span", { class: "nm", text: d.name }),
-        editable && d.name === quick ? el("span", { class: "q-tag", text: "+ gomb" }) : null));
-      if (editable) {
+        editable && !ownerEdit && d.name === quick ? el("span", { class: "q-tag", text: "+ gomb" }) : null));
+      if (ownerEdit) {
+        li.append(el("span", { class: "d-actions" },
+          el("button", { type: "button", class: "mini", "aria-label": "Egy " + d.name + " levonása", disabled: d.n === 0,
+            onclick: () => ownerBump(s.pid, cat.id, d.name, -1) }, "−"),
+          el("span", { class: "d-n cond", text: String(d.n) }),
+          el("button", { type: "button", class: "mini mini-plus", "aria-label": "Még egy " + d.name, onclick: () => ownerBump(s.pid, cat.id, d.name, +1) }, "+")));
+      } else if (editable) {
         if (d.custom && d.n === 0) {
           li.append(el("button", { type: "button", class: "del", "aria-label": d.name + " törlése a listából", onclick: () => removeCustom(cat.id, d.name) }, "×"));
         }
@@ -1761,6 +1797,202 @@
     return el("div", { class: "add-row" },
       el("label", { class: "lbl", for: "customInput", text: "Nincs a listán? Írd be, és felírom:" }),
       el("div", { class: "add-inline" }, input, btn));
+  }
+  /* ---------- tulajdonosi menü ---------- */
+  function ownerUnlocked() { return S.isOwner && S.ownerUntil > Date.now(); }
+  function ownerStatsDay() {
+    const t = (S.partyMeta && S.partyMeta.createdAt) || guessStart();
+    return dayKey(t);
+  }
+  function ownerErrorText(e) {
+    const c = errCode(e);
+    if (c === "permission-denied") return "A szerver nem engedte. Lehet, hogy lejárt a feloldás, vagy a tulajdonosi azonosító nincs beírva a Firestore szabályokba.";
+    if (c === "app/taken") return "Ez a felhasználónév már foglalt.";
+    if (c === "app/no-player") return "Ez a résztvevő már nincs a buliban.";
+    if (c === "aborted" || c === "failed-precondition") return "Közben változtak az adatok. Próbáld újra.";
+    return authErrorText(e);
+  }
+  async function ownerAction(fn, okText, after) {
+    if (!ownerUnlocked()) { S.ownerUntil = 0; toast("Lejárt a feloldás. Add meg újra a jelszavadat."); openSheet({ type: "owner" }); return false; }
+    if (navigator.onLine === false) { toast("Ehhez internet kell."); return false; }
+    try {
+      await fn();
+      if (okText) toast(okText);
+      if (after) after();
+      return true;
+    } catch (e) {
+      console.error(e);
+      if (errCode(e) === "permission-denied") S.ownerUntil = 0;
+      toast(ownerErrorText(e));
+      return false;
+    }
+  }
+  async function doOwnerUnlock(pw, msg, btn) {
+    const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
+    if (!pw) { say("Add meg a jelszavadat.", true); return; }
+    btn.disabled = true;
+    say("Ellenőrzés…");
+    try {
+      await S.backend.ownerUnlock(pw);
+      S.ownerUntil = Date.now() + OWNER_WINDOW_MS;
+      openSheet({ type: "owner" });
+    } catch (e) {
+      console.error(e);
+      btn.disabled = false;
+      const c = errCode(e);
+      say(["auth/invalid-credential", "auth/wrong-password", "auth/invalid-login-credentials"].includes(c) ? "Hibás jelszó." : authErrorText(e), true);
+    }
+  }
+  function ownerBump(uid, cid, name, delta) {
+    if (!S.party) return;
+    const party = S.party;
+    ownerAction(() => S.backend.adminEditPlayer(party, uid, [{ type: "bump", cid, name, delta }], ownerStatsDay(),
+      displayName(uid, S.docs.get(uid)) + ": " + name + " " + (delta > 0 ? "+1" : "−1")));
+  }
+  function ownerLogText(e) {
+    const who = e.target ? displayName(e.target, S.docs.get(e.target)) : "";
+    const names = { rename: "Átnevezés", ban: "Letiltás", unban: "Letiltás feloldása", wipe: "Adatok törlése", edit: "Számláló javítása",
+      reset: "Számlálók nullázása", clearvotes: "Szavazatok törlése", deleteparty: "Buli törlése" };
+    const parts = [names[e.action] || e.action];
+    if (e.detail) parts.push(e.detail); else if (who) parts.push(who);
+    if (e.party) parts.push("(" + e.party + ")");
+    return parts.join(": ").replace(": (", " (");
+  }
+  function ownerBody() {
+    const wrap = el("div", { class: "settings" });
+    if (!ownerUnlocked()) {
+      const pw = el("input", { id: "ownerPw", class: "field", type: "password", maxlength: 128, autocomplete: "current-password", enterkeyhint: "done" });
+      const msg = el("p", { class: "msg", role: "status" });
+      const btn = el("button", { type: "button", class: "btn wide" }, "Feloldás");
+      btn.addEventListener("click", () => doOwnerUnlock(pw.value, msg, btn));
+      pw.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doOwnerUnlock(pw.value, msg, btn); } });
+      wrap.append(
+        el("p", { text: "A tulajdonosi műveletekhez add meg újra a jelszavadat. A feloldás kb. 15 percig érvényes, utána a szerver újra kéri." }),
+        el("label", { class: "lbl", for: "ownerPw", text: "Jelszó" }), pw, btn, msg);
+      return wrap;
+    }
+    const mins = Math.max(1, Math.round((S.ownerUntil - Date.now()) / 60000));
+    wrap.append(el("p", { class: "note", text: "Feloldva még kb. " + mins + " percig. Minden tulajdonosi művelet bekerül a naplóba." }));
+
+    wrap.append(el("h3", { class: "settings-sub cond first", text: "Felhasználók" }));
+    const users = [...S.stats.entries()].filter(([, st]) => st.username)
+      .sort((a, b) => a[1].username.localeCompare(b[1].username, "hu", { sensitivity: "base" }));
+    if (!users.length) wrap.append(el("p", { class: "muted", text: "Még nincs felhasználó." }));
+    const ul = el("ul", { class: "owner-users" });
+    for (const [uid, st] of users) {
+      const flags = [];
+      if (uid === S.myId) flags.push("te");
+      if (S.bans.has(uid)) flags.push("letiltva");
+      if (S.docs.has(uid)) flags.push("ezen a bulin");
+      ul.append(el("li", {}, el("button", { type: "button", class: "owner-user", onclick: () => openSheet({ type: "ownerUser", uid }) },
+        el("span", { class: "dot", style: "background:" + colorFor(uid), "aria-hidden": "true" }),
+        el("span", { class: "ou-name", text: st.username }),
+        flags.length ? el("span", { class: "ou-flags" + (S.bans.has(uid) ? " bad" : ""), text: flags.join(", ") }) : null)));
+    }
+    wrap.append(ul);
+
+    if (S.party && S.phase === "ready") {
+      const party = S.party;
+      const title = partyTitle();
+      wrap.append(el("h3", { class: "settings-sub cond", text: "Ez a buli" }),
+        el("p", { class: "muted", text: "Egy ember számlálóját az ő fülén, a kategóriájára koppintva javíthatod, amíg a tulajdonosi mód fel van oldva." }),
+        el("button", { type: "button", class: "btn danger wide",
+          onclick: () => confirmSheet("A(z) „" + title + "” buli minden adata (minden résztvevő számlálója, a szavazatok és a buli neve) véglegesen törlődik. A résztvevők statisztikája megmarad.", "Törlöm a bulit",
+            () => ownerAction(() => S.backend.adminDeleteParty(party, title), "A buli törölve.", () => { forgetParty(party); switchParty(false); })) },
+          "A buli törlése"));
+    }
+
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Napló" }));
+    const logBox = el("div", { class: "owner-log" }, el("p", { class: "muted", text: "Betöltés…" }));
+    wrap.append(logBox);
+    if (typeof S.backend.adminLog === "function") {
+      S.backend.adminLog(20).then((rows) => {
+        logBox.replaceChildren();
+        if (!rows.length) { logBox.append(el("p", { class: "muted", text: "Még nincs bejegyzés." })); return; }
+        const list = el("ol", { class: "feed" });
+        for (const r of rows) {
+          let when = "";
+          try { when = new Date(r.at).toLocaleString("hu-HU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch (e) {}
+          list.append(el("li", {}, el("span", { text: ownerLogText(r) }), el("span", { class: "f-when", text: when })));
+        }
+        logBox.append(list);
+      }).catch(() => { logBox.replaceChildren(el("p", { class: "muted", text: "A napló nem tölthető be." })); });
+    }
+    return wrap;
+  }
+  function ownerUserBody(uid) {
+    const wrap = el("div", { class: "settings" });
+    const st = S.stats.get(uid) || {};
+    const name = st.username || displayName(uid, S.docs.get(uid));
+    const self = uid === S.myId;
+    const banned = S.bans.has(uid);
+    if (!ownerUnlocked()) {
+      wrap.append(el("p", { text: "Lejárt a feloldás." }),
+        el("button", { type: "button", class: "btn wide", onclick: () => openSheet({ type: "owner" }) }, "Feloldás"));
+      return wrap;
+    }
+    const copyBtn = el("button", { type: "button", class: "btn secondary" }, "Másolás");
+    copyBtn.addEventListener("click", async () => { try { await navigator.clipboard.writeText(uid); toast("Fiókazonosító kimásolva."); } catch (e) { toast(uid); } });
+    wrap.append(el("p", { class: "muted" }, "Fiókazonosító: ", el("span", { class: "code", text: uid })), copyBtn,
+      el("p", { class: banned ? "vote-result bad" : "muted", text: banned ? "Ez a fiók le van tiltva." : "A fiók aktív." }));
+
+    const input = el("input", { id: "ownerRename", class: "field", type: "text", maxlength: 20, autocomplete: "off",
+      autocapitalize: "none", spellcheck: "false", enterkeyhint: "done" });
+    input.value = name;
+    const rbtn = el("button", { type: "button", class: "btn" }, "Mentés");
+    const doRename = () => {
+      const username = input.value.trim();
+      if (!USERNAME_RE.test(username)) { toast("A felhasználónév: " + USERNAME_HINT); return; }
+      if (username === name) return;
+      const oldKey = st.username ? st.username.toLowerCase() : null;
+      ownerAction(() => S.backend.adminRename(uid, username, username.toLowerCase(), oldKey), "Átnevezve: " + username, () => {
+        if (self) { S.username = username; S.usernameKey = username.toLowerCase(); syncMyName(); }
+        openSheet({ type: "ownerUser", uid });
+      });
+    };
+    rbtn.addEventListener("click", doRename);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doRename(); } });
+    wrap.append(el("div", {}, el("label", { class: "lbl", for: "ownerRename", text: "Felhasználónév átírása" }), el("div", { class: "add-inline" }, input, rbtn)));
+
+    if (S.party && S.phase === "ready" && S.docs.has(uid)) {
+      const party = S.party;
+      wrap.append(el("h3", { class: "settings-sub cond", text: "Ezen a bulin" }),
+        el("button", { type: "button", class: "btn secondary wide",
+          onclick: () => confirmSheet(name + " összes számlálója nullára áll ezen a bulin, és a statisztikájából is levonódik.", "Nullázom",
+            () => ownerAction(() => S.backend.adminEditPlayer(party, uid, [{ type: "reset" }], ownerStatsDay(), name), "Nullázva.", () => openSheet({ type: "ownerUser", uid }))) },
+          "Számlálóinak nullázása"),
+        el("button", { type: "button", class: "btn secondary wide",
+          onclick: () => confirmSheet("Minden róla szóló hányás-szavazat törlődik ezen a bulin.", "Törlöm",
+            () => ownerAction(() => S.backend.adminClearVotesAbout(party, uid, name), "A szavazatok törölve.", () => openSheet({ type: "ownerUser", uid }))) },
+          "A róla szóló hányás-szavazatok törlése"));
+    }
+
+    if (!self) {
+      wrap.append(el("h3", { class: "settings-sub cond", text: "Fiók" }),
+        el("button", { type: "button", class: "btn secondary wide",
+          onclick: () => confirmSheet(banned ? name + " újra használhatja az appot." : name + " ezután semmit nem lát és nem írhat az appban, de a saját fiókját törölheti.",
+            banned ? "Feloldom" : "Letiltom",
+            () => ownerAction(() => S.backend.adminBan(uid, !banned, name), banned ? "A letiltás feloldva." : "Letiltva.", () => {
+              if (banned) S.bans.delete(uid); else S.bans.add(uid);
+              openSheet({ type: "ownerUser", uid });
+            })) },
+          banned ? "Letiltás feloldása" : "Letiltás"),
+        el("button", { type: "button", class: "btn danger wide",
+          onclick: () => confirmSheet(name + " profilja, felhasználóneve, statisztikája, valamint számlálói és szavazatai minden ismert buliból véglegesen törlődnek. Ha nem szeretnéd, hogy újra regisztráljon ezzel a fiókkal, előbb tiltsd le.", "Törlöm",
+            () => ownerAction(() => S.backend.adminWipe(uid, [...new Set([...loadParties().map(p => p.code), ...(S.party ? [S.party] : [])])], name), "Az adatai törölve.", () => openSheet({ type: "owner" }))) },
+          "Összes adatának törlése"),
+        el("p", { class: "muted small", text: "A belépési rekordot (a Firebase-fiókot) csak a Firebase konzolban lehet törölni: Authentication, Users, majd keresd meg a fenti fiókazonosítót." }));
+    }
+    return wrap;
+  }
+  function bannedView() {
+    return el("section", { class: "onboard" },
+      el("h2", { class: "hero cond", text: "Letiltva" }),
+      el("p", { class: "lead", text: "Az app tulajdonosa letiltotta a fiókodat, ezért most nem használhatod az appot. Ha szerinted ez tévedés, keresd az adatkezelőt." }),
+      el("p", { class: "muted", text: "Adatkezelő: " + privacyInfo().controller + ". Elérhetőség: " + privacyInfo().contact + "." }),
+      el("button", { type: "button", class: "link-btn", onclick: () => openSheet({ type: "privacy" }) }, "Adatkezelési tájékoztató"),
+      el("button", { type: "button", class: "link-btn", onclick: () => openSheet({ type: "delete" }) }, "Fiókom törlése"),
+      el("button", { type: "button", class: "link-btn", onclick: logout }, "Kijelentkezés"));
   }
   function emailSettings() {
     const box = el("div", { class: "stack" });
@@ -1815,6 +2047,9 @@
       el("label", { class: "lbl", for: "setUser", text: "Felhasználónév" }),
       el("div", { class: "add-inline" }, uinput, usave),
       el("p", { class: "hint spaced", text: USERNAME_HINT })));
+    const uidCopy = el("button", { type: "button", class: "btn secondary" }, "Másolás");
+    uidCopy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(S.myId); toast("Fiókazonosító kimásolva."); } catch (e) { toast(S.myId); } });
+    wrap.append(el("div", {}, el("p", { class: "muted small" }, "Fiókazonosító (UID): ", el("span", { class: "code", text: S.myId })), uidCopy));
     wrap.append(emailSettings());
     wrap.append(el("button", { type: "button", class: "btn secondary wide",
       onclick: () => confirmSheet("Kijelentkezel ebből a fiókból ezen a telefonon.", "Kijelentkezem", logout) }, "Kijelentkezés"));
@@ -1896,6 +2131,10 @@
     S.emailReal = !!backend.emailIsReal;
     S.emailVerified = !!backend.emailVerified;
     if (S.emailReal) lsSet("strigula-pending-email", null);
+    S.isOwner = !backend.isAnonymous && !!OWNER_UID && backend.uid === OWNER_UID;
+    if (!backend.isAnonymous && typeof backend.isBanned === "function") {
+      try { if (await backend.isBanned()) { S.phase = "banned"; renderAll(); return; } } catch (e) {}
+    }
     if (backend.isAnonymous) {
       S.phase = "auth";
       renderAll();

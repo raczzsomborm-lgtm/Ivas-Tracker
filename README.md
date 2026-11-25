@@ -11,22 +11,48 @@ a saját fülén vezeti, mit ivott, és a többiek élőben látják.
 - `firestore.rules`: az adatbázis szabályai, ezt a Firebase konzolba kell bemásolni
 - `manifest.webmanifest`, `sw.js`, `icons/`: ettől települ appként a telefonra
 
-## Frissítés a korábbi változatról (adatvédelmi frissítés)
+## Frissítés a korábbi változatról (tulajdonosi menü)
 
-1. **`config.js`:** a fájl alján a `MASNAPLO_PRIVACY` részbe írd be a nevedet (te vagy az adatkezelő)
-   és egy elérhetőséget, például az e-mail-címedet. Ez jelenik meg az adatkezelési tájékoztatóban.
-2. **Firebase → Firestore → Rules:** cseréld le a szabályokat az új `firestore.rules` tartalmára, és **Publish**.
-3. **Firebase → Security → Authentication → Settings → User actions:** az **Enable deletion** legyen bekapcsolva
-   (alapból be van), különben a fióktörlés nem működik.
-4. Nem kötelező, de ajánlott: **Authentication → Templates** alatt a levelek nyelvét állítsd magyarra.
-   Ha a Firebase a projekt beállításainál felajánlja a Google adatfeldolgozási feltételeinek (Data Processing Terms)
-   elfogadását, azt is fogadd el.
-5. **GitHub:** **Add file → Upload files**, húzd be a mappa teljes tartalmát, és **Commit changes**.
-6. Várj pár percet, zárd be teljesen az appot, és nyisd meg újra. Mindenki egyszer látni fog egy
-   hozzájárulási képernyőt: ott el kell fogadnia a tájékoztatót, vagy törölheti a fiókját.
+1. **GitHub:** **Add file → Upload files**, húzd be a mappa teljes tartalmát, és **Commit changes**.
+2. **Firebase → Firestore → Rules:** másold be az új `firestore.rules` teljes tartalmát, és **Publish**.
+   Amíg a fájl elején a minta szöveg (`IDE_JON_A_SAJAT_UID`) áll, senkinek nincs tulajdonosi joga, így ez biztonságos.
+3. Nyisd meg az appot. Mivel a tájékoztató bővült, mindenki egyszer újra látja a hozzájárulási képernyőt.
+4. Utána állítsd be magad tulajdonosnak (lásd lent).
 
-Ha még a fiókok előtti változatról frissítesz, előbb kapcsold be az **Email/Password** bejelentkezést is
-(Authentication → Sign-in method → Add new provider → Email/Password), az Anonymous pedig maradjon bekapcsolva.
+Ha még az adatvédelmi frissítés előtti változatról jössz, a `config.js` `MASNAPLO_PRIVACY` részébe írd be a nevedet
+és egy elérhetőséget, és ellenőrizd, hogy a Firebase-ben az **Authentication → Settings → User actions** alatt az
+**Enable deletion** be van-e kapcsolva.
+
+## Tulajdonosi menü beállítása (egyszer kell)
+
+1. Az appban: **☰ → Beállítások → Fiók → Fiókazonosító (UID) → Másolás.**
+   (Ugyanezt a Firebase konzolban is megtalálod: Authentication → Users → User UID oszlop.)
+2. **`firestore.rules`:** a fájl elején az `ownerUid()` részben cseréld le az `IDE_JON_A_SAJAT_UID` szöveget a
+   kimásolt UID-ra (az aposztrófok maradjanak), másold be a Firebase konzolba, és **Publish**.
+3. **`config.js`:** a `MASNAPLO_OWNER_UID` értékét is cseréld le ugyanerre a UID-ra, és töltsd fel GitHubra.
+4. Nyisd meg újra az appot: a menüben megjelenik a **Tulajdonos** pont. Másoknál nem jelenik meg, és ha valaki
+   a kódot átírva megjelenítené, a szerver akkor is elutasítja.
+
+**Hogyan véd:**
+- A jogot a szerver adja a szabályokban lévő UID alapján, nem az app.
+- Tulajdonosi műveletet a szerver csak akkor enged, ha az elmúlt 15 percben újra beírtad a jelszavadat.
+  Ha valaki a feloldott telefonodhoz hozzáfér, jelszó nélkül akkor sem tud semmit csinálni.
+- Minden tulajdonosi művelet bekerül egy naplóba, amit az appból sem módosítani, sem törölni nem lehet.
+- A tulajdonost nem lehet letiltani, és a saját fiókodat a menüből nem lehet kiüríteni.
+
+**Mit tud a Tulajdonos menü:** felhasználók átnevezése, letiltása és feloldása, egy felhasználó összes adatának
+törlése, egy ember számlálóinak nullázása és a róla szóló hányás-szavazatok törlése az aktuális bulin, egy egész buli
+törlése, és a napló megtekintése. Egy ember számlálóját darabonként is javíthatod: nyisd meg a fülét, és koppints a
+kategóriájára, amíg a tulajdonosi mód fel van oldva.
+
+**Amit nem tud:** a belépési rekordot (a Firebase-fiókot) az app nem tudja törölni. Ha teljesen el akarsz tüntetni
+egy fiókot: Firebase konzol → Authentication → Users → keresd meg a fiókazonosítót → ⋮ → Delete account.
+A letiltás és az adatok törlése után ez a rekord már semmire nem használható.
+
+**Biztonsági javaslatok:**
+- A tulajdonosi fiókodhoz használj erős, máshol nem használt jelszót, és adj meg hozzá e-mail-címet.
+- A Firebase konzolhoz használt Google-fiókodon kapcsold be a kétlépcsős azonosítást. A konzol mindenhez hozzáfér,
+  ez a legerősebb kulcs az egész rendszerhez.
 
 ## Fiókok
 
@@ -77,7 +103,8 @@ Ha még a fiókok előtti változatról frissítesz, előbb kapcsold be az **Ema
 1. console.firebase.google.com: új projekt, Firestore adatbázis (Standard, `(default)`, európai hely, production mode).
 2. Authentication: az **Anonymous** és az **Email/Password** bejelentkezés bekapcsolása.
 3. Firestore Rules: a `firestore.rules` tartalma, Publish.
-4. Project settings → Your apps → Web app: a kapott adatokat írd be a `config.js` fájlba.
+4. Project settings → Your apps → Web app: a kapott adatokat írd be a `config.js` fájlba
+   (a `MASNAPLO_PRIVACY` részt és a tulajdonos UID-ját is).
 5. Feltöltés GitHub Pagesre, majd Authentication → Settings → Authorized domains: `FELHASZNALONEV.github.io`.
 
 ## Költség
