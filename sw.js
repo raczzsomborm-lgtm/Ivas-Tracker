@@ -1,9 +1,9 @@
 /* Másnapló service worker: az app héját offline is elérhetővé teszi.
    Saját fájlok: előbb hálózat, ha nincs net, a mentett példány (így a frissítések mindig megjönnek).
    Firebase könyvtárak és betűtípusok: verziózott, változatlan fájlok, ezért előbb a mentett példány. */
-const CACHE = "masnaplo-v6";
+const CACHE = "masnaplo-v8";
 const SHELL = [
-  "./", "./index.html", "./app.js?v=6", "./backend.js?v=6", "./config.js", "./manifest.webmanifest",
+  "./", "./index.html", "./app.js?v=8", "./backend.js?v=8", "./config.js", "./manifest.webmanifest",
   "./icons/masnaplo-192.png", "./icons/masnaplo-512.png", "./icons/masnaplo-apple-180.png",
 ];
 
