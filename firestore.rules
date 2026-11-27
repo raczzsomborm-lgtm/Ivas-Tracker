@@ -3,8 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ===== A TULAJDONOS =====
-    // Ide írd a saját fiókazonosítódat (UID). Az appban: Profil, Fiók és e-mail, Fiókazonosító.
-    // Amíg itt a minta szöveg áll, senkinek nincs tulajdonosi joga.
+    // A tulajdonos fiókazonosítója (UID). Ugyanez áll a config.js-ben (MASNAPLO_OWNER_UID).
     function ownerUid() {
       return '3hTaBCw1TYdBJt4mfVm3w0mEm7y1';
     }
@@ -163,7 +162,18 @@ service cloud.firestore {
           || (request.auth.uid == fid && exists(/databases/$(database)/documents/friendReqs/$(uid + '_' + fid))));
     }
 
-    // Saját ivós játék.
+    function validUserGame(d) {
+      return d.keys().hasOnly(['uid', 'name', 'players', 'tools', 'desc', 'shared', 'createdAt', 'updatedAt'])
+        && d.uid is string
+        && d.shared is bool
+        && d.name is string && d.name.size() <= 60
+        && d.players is string && d.players.size() <= 30
+        && d.tools is string && d.tools.size() <= 300
+        && d.desc is string && d.desc.size() <= 2000
+        && d.createdAt is number
+        && d.updatedAt is number;
+    }
+    // Saját ivós játék (régi hely).
     function validGame(d) {
       return d.keys().hasOnly(['name', 'players', 'tools', 'desc', 'createdAt', 'updatedAt'])
         && d.name is string && d.name.size() <= 60
@@ -199,7 +209,25 @@ service cloud.firestore {
       allow delete: if isMeAny(uid) || ownerFresh();
     }
 
-    // Saját ivós játékok: csak a felhasználó látja és írja.
+    // Ivós játékok (v13): a felhasználók játékai egy közös gyűjteményben. A megosztottat (shared: true) minden
+    // felhasználó látja, a többit csak a készítője. A készítő szerkeszti és törli; a tulajdonos friss jelszóval bármelyiket
+    // törölheti. (A régi helyükről, a users/{uid}/games alól az app magától átköltözteti őket.)
+    match /games/{gid} {
+      allow read: if ownerFresh()
+        || (account() && resource.data.uid == request.auth.uid)
+        || (member() && resource.data.shared == true);
+      allow create: if member()
+        && validUserGame(request.resource.data)
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if member()
+        && resource.data.uid == request.auth.uid
+        && validUserGame(request.resource.data)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if (account() && resource.data.uid == request.auth.uid) || ownerFresh();
+    }
+
+    // Régi hely: saját ivós játékok (csak a felhasználó látja és írja). Az új app innen átköltözteti őket.
     match /users/{uid}/games/{gameId} {
       allow read: if isMeAny(uid) || ownerFresh();
       allow create, update: if isMe(uid) && validGame(request.resource.data);
@@ -249,7 +277,8 @@ service cloud.firestore {
 
     // Kocsmák: csak a tagok látják. Az alapító kezeli; a kocsmás bulit bármelyik tag elindíthatja.
     match /kocsmak/{kid} {
-      allow get: if ownerFresh() || isKMember(kid);
+      // Az alapító akkor is olvashatja, ha (egy korábbi hiba miatt) kikerült belőle: így vissza tud lépni.
+      allow get: if ownerFresh() || isKMember(kid) || (member() && resource.data.owner == request.auth.uid);
       allow list: if ownerFresh();
       allow create: if member()
         && validKocsma(request.resource.data)
@@ -283,7 +312,14 @@ service cloud.firestore {
         && existsAfter(kCodePath(request.resource.data.code))
         && getAfter(kCodePath(request.resource.data.code)).data.kid == kid
         && (uid in getAfter(kCodePath(request.resource.data.code)).data.m);
-      allow update: if false;
+      // Csak a saját havi hányásszámát (v: {"ÉÉÉÉ-HH": db}) írhatja át, mást nem. A tulajdonos (nullázáskor) törölheti.
+      allow update: if (ownerFresh()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['v'])
+          && !('v' in request.resource.data))
+        || (isMe(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['v'])
+          && request.resource.data.v is map
+          && request.resource.data.v.size() <= 120);
       allow delete: if ownerFresh()
         || isMeAny(uid)
         || (member() && get(kocsmaPath(kid)).data.owner == request.auth.uid);
@@ -339,8 +375,17 @@ service cloud.firestore {
     // Egy buli résztvevői: mindenki csak a sajátját írhatja (a tulajdonos javíthat).
     match /parties/{party}/players/{uid} {
       allow read: if member();
-      allow create, update: if (isMe(uid) || ownerFresh()) && validPlayer(request.resource.data);
+      allow create, update: if (ownerFresh() || isMe(uid)) && validPlayer(request.resource.data);
       allow delete: if isMeAny(uid) || ownerFresh();
+    }
+
+    // Minden buli résztvevői és szavazatai egy lekérdezésben (gyűjteménycsoport): csak a tulajdonosnak, a
+    // „minden fogyasztás nullázása” művelethez (így a régi, név nélküli bulik is benne vannak).
+    match /{path=**}/players/{uid} {
+      allow list: if ownerFresh();
+    }
+    match /{path=**}/votes/{uid} {
+      allow list: if ownerFresh();
     }
 
     // Hányás-szavazás: mindenki csak a saját szavazatait írhatja (a tulajdonos törölhet belőlük).
@@ -362,6 +407,15 @@ service cloud.firestore {
     }
 
     // Tulajdonosi napló: csak bővíthető, az appból se módosítani, se törölni nem lehet.
+    // Az app közös jelzései: resetAt = a tulajdonos legutóbbi „minden fogyasztás nullázása” ideje (ebből tudják a
+    // telefonok, hogy a helyben tárolt számításaikat el kell dobniuk).
+    match /meta/{id} {
+      allow read: if request.auth != null;
+      allow create, update: if ownerFresh()
+        && request.resource.data.keys().hasOnly(['resetAt'])
+        && request.resource.data.resetAt is number;
+      allow delete: if ownerFresh();
+    }
     match /adminlog/{id} {
       allow read: if isOwner();
       allow create: if ownerFresh()

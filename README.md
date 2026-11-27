@@ -8,9 +8,91 @@ A barátok kocsmákba (állandó baráti társaságokba) gyűlnek: közös chat,
 
 - `index.html`, `app.js`: maga az app (felület és logika)
 - `backend.js`: a Firebase kapcsolat (fiókok és adatbázis)
-- `config.js`: a Firebase projekted adatai (már ki van töltve az ivas-tracker projekttel)
-- `firestore.rules`: az adatbázis szabályai, ezt a Firebase konzolba kell bemásolni
+- `config.js`: a Firebase projekted adatai (ivas-tracker), az üzemeltető neve és elérhetősége (Rácz Zsombor Marcell,
+  racz.zsomborm@gmail.com) és a tulajdonos UID-ja (`3hTaBCw1TYdBJt4mfVm3w0mEm7y1`) – minden ki van töltve, feltölthető
+- `firestore.rules`: az adatbázis szabályai, ezt a Firebase konzolba kell bemásolni (a tulajdonos UID-ja már benne van)
 - `manifest.webmanifest`, `sw.js`, `icons/`: ettől települ appként a telefonra
+
+## A saját adataid már benne vannak
+
+A csomagban a `firestore.rules` (`ownerUid()`) és a `config.js` (`MASNAPLO_OWNER_UID`, `MASNAPLO_PRIVACY`) már a te
+adataidat tartalmazza: UID `3hTaBCw1TYdBJt4mfVm3w0mEm7y1`, név Rácz Zsombor Marcell, elérhetőség racz.zsomborm@gmail.com.
+Így a szabályokat szerkesztés nélkül, egészben bemásolhatod és Publish-olhatod, a `config.js`-t pedig nyugodtan feltöltheted.
+(A lenti, régebbi frissítési lépésekben szereplő „írd vissza a UID-odat” és „a `config.js`-t ne töltsd fel” már nem kell.)
+
+## Frissítés: megosztott ivós játékok, világos/sötét mód, Páros-páratlan (v13)
+
+- **Ivós játékok fül, két fül:** **Az app játékai** (14 beépített játék, köztük újra a Páros-páratlan, orgia nélkül) és
+  **Felhasználók játékai**: a saját játékaid („Megosztva” vagy „Csak te látod” jelöléssel), alattuk **Mások játékai**
+  (amit mások megosztottak, a készítő nevével). Játék felvételekor vagy szerkesztésekor bejelölheted: **Megosztom a többi
+  felhasználóval**. A megosztottat mindenki látja, a többit csak te. Tulajdonosként (feloldott módban) egy megosztott
+  játék lapján **Törlés (tulajdonos)**, naplózva.
+- A korábbi saját játékok az első indításkor maguktól átköltöznek az új helyre (nem megosztva).
+- **Profil → Beállítások → Megjelenés:** Világos · Sötét · Automatikus (a telefon beállítását követi). A választás az
+  adott telefonon marad meg.
+- **Felhasználási feltételek, 5. pont:** a felhasználók játékait az üzemeltető nem ellenőrzi; egyik játékért, és az
+  ezekből eredő károkért vagy személyi sérülésekért sem vállal felelősséget (a 7. pontban leírt, jogszabályi keretek
+  között). A tájékoztató is bővült (megosztott játékok), ezért mindenki egyszer újra elfogadja a feltételeket.
+
+1. **Firebase → Firestore → Rules:** másold be az új `firestore.rules` teljes tartalmát (a UID-od már benne van), és
+   **Publish**. Új benne a közös `games` gyűjtemény szabálya. Ez kell előbb, különben a játékok nem költöznek át, és újat
+   sem lehet felvenni.
+2. **GitHub → Add file → Upload files:** `index.html`, `app.js`, `backend.js`, `config.js`, `sw.js`, `README.md`,
+   `FEJLESZTES.md`, majd **Commit changes**.
+
+## Frissítés: ivós játékok, ital-ikonok, Jelvényeim (v12)
+
+- **Ivós játékok fül:** a saját játékaid alatt megjelent **Az app játékai** rész 13 beépített játékkal (magyarul, létszámmal,
+  eszközökkel és leírással; egy játékra koppintva a teljes leírás). Ezeket mindenki látja, és nem szerkeszthetők; a kereső
+  a magyar és az eredeti (angol) névre is keres. A saját játékok ugyanúgy működnek, mint eddig.
+- **Ital-ikonok:** a rövid, bor, sör és víz/üdítő emoji helyett saját vektoros rajzok (a kategória színével) mindenhol, ahol
+  fogyasztás látszik: a Ma sávban, a buli versenyében, a havi ranglistán, a „Legutóbb” listában, a statisztikában, a
+  Napjaim listában és az ital-lapokon.
+- **Profil → Jelvényeim:** koppintásra elhomályosodik a háttér, és megjelennek a jelvények helyei („Fejlesztés alatt”,
+  egyelőre „Hamarosan” helyőrzőkkel). A jelvényeket és a leírásukat később adjuk hozzá (`app.js`, `BADGES` lista).
+
+Feltöltés: **GitHub → Add file → Upload files**: `index.html`, `app.js`, `backend.js`, `sw.js`, `README.md`,
+`FEJLESZTES.md`, majd **Commit changes**. A szabályok (`firestore.rules`) a v11 óta nem változtak, a `config.js`-t ne töltsd
+fel. (Ha a v11-et még nem töltötted fel, a szabályokat a v11-es lépések szerint közzé kell tenni.)
+
+## Frissítés: kocsma-javítás és „Minden fogyasztás nullázása” (v11)
+
+**A hiba:** alapítás vagy belépés után a kocsma eltűnt, és nem lehetett megnyitni. Az app a kocsmát már akkor elkezdte
+figyelni, amikor az alapítás (vagy a belépés) még úton volt a szerver felé; a szerver ezt az első figyelést elutasította,
+az app pedig ezt úgy értette, hogy kikerültél a kocsmából, és törölte a saját tagságodat. Most az app előbb megvárja,
+hogy a saját írásai a szerverre érjenek, és a szerveren ellenőrzi, valóban kikerültél-e; ha tag vagy, egyszerűen újra
+figyel. **A hiba miatt már elveszett kocsmák:** ha te alapítottad, az app indításkor magától visszalép bele (a neve, a
+kódja és a chatje megvan). Ha valaki más kocsmájába léptél be, és onnan esett ki, lépj be újra a kóddal vagy a linkkel.
+
+1. **Firebase → Firestore → Rules:** másold be az új `firestore.rules`-t, **az `ownerUid()` részbe írd vissza a saját
+   UID-odat** (a mintában `IDE_JON_A_SAJAT_UID` áll), és **Publish**. Új benne: az alapító akkor is olvashatja a kocsmáját,
+   ha kiesett belőle (ehhez kell a visszalépés), a nullázáshoz a `meta` gyűjtemény, a bulik résztvevőinek és
+   szavazatainak csoportos lekérdezése (csak a tulajdonosnak), és hogy a tulajdonos törölhesse a havi hányásszámot.
+2. **GitHub:** **Add file → Upload files**: `index.html`, `app.js`, `backend.js`, `sw.js`, `README.md`, `FEJLESZTES.md`
+   (és a `firestore.rules`, ha beleírtad a UID-odat), majd **Commit changes**. A `config.js`-t ne töltsd fel.
+3. Nyisd meg az appot (ha kell, zárd be teljesen és nyisd meg újra, hogy az új változat töltődjön be).
+
+**Minden fogyasztás nullázása:** Profil → Beállítások → **Tulajdonos** → jelszó → **Feloldás** → lent, az
+**Újrakezdés** résznél **Minden fogyasztás nullázása** → írd be: `NULLÁZÁS` → **Nullázom**. Mindenkinél törlődik minden
+felírt ital (a napi naplóból, a statisztikából, a bulik összesítéséből), minden hányás-szavazat és a kocsmákban a havi
+hányásszám, így minden ranglista nulláról indul. Megmarad: a fiókok, a barátok, a kocsmák és a chat, a bulik (a nevük, és
+hogy kinek melyik napja tartozik hozzájuk), a saját italnevek és az ivós játékok. A művelet bekerül a naplóba, és ha
+félbeszakad (pl. elment a net), nyugodtan újra lehet indítani. A többi telefon a következő megnyitáskor (vagy ha éppen
+nyitva van, azonnal) a nullázott adatokat mutatja. Ha valakinek a telefonja a nullázás előtt netkapcsolat nélkül
+írt fel italt, az a net visszatérésekor még felkerülhet; ilyenkor elég a nullázást újra lefuttatni.
+
+## Frissítés: hányás a havi ranglistában (v10)
+
+A kocsma havi ranglistájába most a buliban megszavazott hányás is beleszámít (−20 pont hányásonként).
+Ha a v9-et (barátok és kocsmák) még nem töltötted fel, az alatta lévő v9-es lépéssort kövesd: a v10 azt is tartalmazza.
+
+1. **Firebase → Firestore → Rules:** másold be az új `firestore.rules` teljes tartalmát, **az `ownerUid()` részbe írd
+   vissza a saját UID-odat** (a mintában `IDE_JON_A_SAJAT_UID` áll), és **Publish**. Új: a kocsmatag a saját tagsági
+   dokumentumába beírhatja a havi hányásszámát. (Ha ez kimarad, az app nem hibázik, csak a hányás nem jut el a többiekhez.)
+2. **GitHub:** **Add file → Upload files**: `index.html`, `app.js`, `backend.js`, `sw.js`, `README.md`, `FEJLESZTES.md`
+   (és a `firestore.rules`, ha beleírtad a UID-odat), majd **Commit changes**. A `config.js`-t ne töltsd fel.
+3. Mivel bővült az adatkezelési tájékoztató (a kocsma tagjai látják a havi megszavazott hányásszámodat), mindenki egyszer
+   újra látja a hozzájárulási képernyőt.
 
 ## Frissítés a barátokra és kocsmákra (v9)
 
@@ -67,11 +149,13 @@ visszajön a net, ott folytatja, ahol abbahagyta, és semmit nem számol kétsze
 
 ## Tulajdonosi menü beállítása (egyszer kell)
 
+A te UID-od (`3hTaBCw1TYdBJt4mfVm3w0mEm7y1`) már benne van a `firestore.rules` `ownerUid()` részében és a `config.js`
+`MASNAPLO_OWNER_UID` sorában. Ha egyszer más lenne a tulajdonos:
 1. Az appban: **Profil → Fiók és e-mail → Fiókazonosító (UID) → Másolás.**
    (Ugyanezt a Firebase konzolban is megtalálod: Authentication → Users → User UID oszlop.)
-2. **`firestore.rules`:** a fájl elején az `ownerUid()` részben cseréld le az `IDE_JON_A_SAJAT_UID` szöveget a
-   kimásolt UID-ra (az aposztrófok maradjanak), másold be a Firebase konzolba, és **Publish**.
-3. **`config.js`:** a `MASNAPLO_OWNER_UID` értékét is cseréld le ugyanerre a UID-ra, és töltsd fel GitHubra.
+2. **`firestore.rules`:** a fájl elején az `ownerUid()` részben írd át a UID-ot (az aposztrófok maradjanak), másold be a
+   Firebase konzolba, és **Publish**.
+3. **`config.js`:** a `MASNAPLO_OWNER_UID` értékét is írd át ugyanerre, és töltsd fel GitHubra.
 4. Nyisd meg újra az appot: a Profil fül Beállítások részében megjelenik a **Tulajdonos** pont. Másoknál nem jelenik meg,
    és ha valaki a kódot átírva megjelenítené, a szerver akkor is elutasítja.
 
@@ -95,7 +179,8 @@ az üzemeltetőt.
 
 **Mit tud a Tulajdonos menü:** felhasználók átnevezése, letiltása és feloldása, egy felhasználó összes adatának
 törlése, egy ember számlálóinak nullázása és a róla szóló hányás-szavazatok törlése a megnyitott bulin, egy egész buli
-törlése, és a napló megtekintése. Egy ember számlálóját darabonként is javíthatod: a buliban koppints a nevére, majd a
+törlése, **minden fogyasztás nullázása mindenkinél** (lásd a v11-es frissítésnél), megosztott ivós játék törlése (a
+játék lapján), és a napló megtekintése. Egy ember számlálóját darabonként is javíthatod: a buliban koppints a nevére, majd a
 kategóriájára, amíg a tulajdonosi mód fel van oldva. A javítás az illető napi naplójában (a buliba rendelt napján) és a
 statisztikájában is átvezetődik. Buli törlésekor a résztvevők napi naplója megmarad, a napjaik csak már nem tartoznak
 ahhoz a bulihoz.
@@ -154,9 +239,12 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
 - A napi napló részleteit (melyik nap pontosan mit ivott, melyik napja melyik bulihoz tartozik), a saját ivós
   játékokat és a barátlistát csak a felhasználó látja (és a tulajdonos, friss jelszóval). A statisztikát (kategóriánként,
   napi bontásban is) és a bulikon felírt italokat a többiek is látják.
+- A saját ivós játékokat csak a készítőjük látja, kivéve a megosztottakat: azokat minden felhasználó látja a készítő
+  felhasználónevével.
 - Egy barátkérést a küldője és a címzettje lát. Egy kocsma nevét, profilképét és tagjait az látja, akinek megvan a
   meghívókódja; a chatet, a kocsmás bulit és a meghívókódot csak a kocsma tagjai. A havi ranglista a tagok nyilvános
-  statisztikájából számol.
+  statisztikájából számol; a megszavazott hányások havi számát mindenki telefonja a saját bulijai szavazataiból számolja ki,
+  és beírja a kocsmái tagsági adatába (ezt csak a kocsma tagjai látják).
 - **Fiókom törlése** (Profil): a jelszó megadása után törli a fiókot, a felhasználónevet, a statisztikát, a napi naplót,
   a saját ivós játékokat, a barátságokat és barátkéréseket, minden chat-üzenetet (azokban a kocsmákban is, amelyekből
   korábban kilépett), valamint a buli-összesítéseket és a szavazatokat minden olyan buliból, amelyet a felhasználó
@@ -182,7 +270,9 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
     tagot távolíthat el (ilyenkor új meghívókód készül, hogy a régivel ne lehessen visszalépni), új meghívókódot kérhet,
     és törölheti a kocsmát. Ha az alapító kilép, a legrégebbi tag kapja meg; ha az utolsó tag lép ki, a kocsma törlődik.
   - **Havi ranglista:** a tagok pontjai a hónap minden napjából (bulival vagy anélkül), ugyanazzal a pontozással, mint a
-    buliban, de hányás nélkül. Korábbi hónapok is visszanézhetők. Egy tagra koppintva a profilja látszik.
+    buliban, a hányással együtt: minden hányás, amit egy buliban a többiek megszavaztak, −20 pont abban a hónapban,
+    amelyikben a buli első napja volt (a sorban 🤮 jelzi). Korábbi hónapok is visszanézhetők. Egy tagra koppintva a
+    profilja látszik.
 - **Barátok (Profil fül):** **Barát hozzáadása** felhasználónév alapján; a kérést a másik elfogadhatja vagy elutasíthatja,
   te visszavonhatod. Egy barátra koppintva a statisztikája látszik, és meghívhatod a kocsmádba.
 - **Kocsma fül, „Ma” sáv:** a négy kategória (rövid, bor, sör, víz) mai darabszáma. A **+1** gomb az alatta kiírt,
@@ -201,7 +291,11 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
   A Napjaim listában bármelyik nap megnyitható: utólag javíthatod (+/−, ez a statisztikát és a buli összesítését is
   frissíti), és buliba rendelheted (meglévő bulidhoz, új bulihoz névvel, vagy kóddal), illetve kiveheted belőle.
   A „Másik nap” gombbal egy korábbi, még üres napot is felírhatsz.
-- **Ivós játékok fül:** saját játékok (név, létszám, eszközök, rövid leírás), keresés név alapján. Csak te látod őket.
+- **Ivós játékok fül:** két fül. **Az app játékai:** 14 beépített játék (mindenki látja; koppintásra a teljes leírás).
+  **Felhasználók játékai:** a saját játékaid (név, létszám, eszközök, rövid leírás; megosztva mindenki látja, különben csak
+  te), és mások megosztott játékai a készítő nevével. Keresés név alapján a megnyitott fülön (az app játékainál az
+  eredeti névre is).
+- **Profil → Jelvényeim:** a jelvények helye (fejlesztés alatt); megnyitáskor a háttér elhomályosodik.
 - **Naptár és Térkép:** hamarosan.
 - **Mennyiségek:** rövid 4 cl, bor 1 dl, sör 5 dl, víz vagy üdítő 3 dl darabonként. Imperialban brit fl oz és pint.
 - **Verseny:** pontok: rövid +5, bor +3, sör +2, víz vagy üdítő +0,25.

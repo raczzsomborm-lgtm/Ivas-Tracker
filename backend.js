@@ -124,6 +124,9 @@ function hand(backend, problem) {
   const daysColl = (uid) => fs.collection(db, "users", uid, "days");
   const gameRef = (uid, id) => fs.doc(db, "users", uid, "games", id);
   const gamesColl = (uid) => fs.collection(db, "users", uid, "games");
+  // Ivós játékok (v13): közös gyűjtemény, { uid, …, shared }. A régi helyről (users/{uid}/games) átköltöztetjük.
+  const ugRef = (id) => fs.doc(db, "games", id);
+  const ugColl = () => fs.collection(db, "games");
   // Barátok és kocsmák
   const kocsmaRef = (kid) => fs.doc(db, "kocsmak", kid);
   const kMemberRef = (kid, uid) => fs.doc(db, "kocsmak", kid, "members", uid);
@@ -513,6 +516,8 @@ function hand(backend, problem) {
       }
       const games = await fs.getDocs(gamesColl(u.uid));
       for (const g of games.docs) refs.push(g.ref);
+      const ug = await fs.getDocs(fs.query(ugColl(), fs.where("uid", "==", u.uid)));
+      for (const g of ug.docs) refs.push(g.ref);
       for (const c of [...codes]) {
         if (typeof c === "string" && /^[a-z0-9-]{3,40}$/.test(c)) refs.push(playerRef(c, u.uid), voteRef(c, u.uid));
       }
@@ -576,6 +581,131 @@ function hand(backend, problem) {
       batch.set(logRef(), logEntry(on ? "ban" : "unban", uid, null, label));
       await batch.commit();
     },
+    // Minden fogyasztás nullázása (tulajdonos): minden felhasználó statisztikája és napi naplója (az italok törlődnek, a
+    // napok buliba rendelése megmarad; buli nélküli napok törlődnek), minden buli-összesítés nullára (a résztvevők és a buli
+    // neve megmarad), minden hányás-szavazat és a kocsmákban a havi hányásszám törlődik. A fiókok, a barátok, a kocsmák, a
+    // chat és az ivós játékok megmaradnak. Ismételhető: ha félbeszakad, újra el lehet indítani.
+    async adminResetConsumption(progress) {
+      const say = (t) => { try { if (progress) progress(t); } catch (e) {} };
+      const now = Date.now();
+      const sum = { users: 0, days: 0, players: 0, votes: 0, members: 0, failed: 0 };
+      // Kötegekben ír; ha egy köteget a szabály elutasít (pl. egy hibás régi dokumentum miatt), egyenként próbálja.
+      async function run(ops, size) {
+        const apply = (b, o) => {
+          if (o.kind === "delete") b.delete(o.ref);
+          else if (o.kind === "update") b.update(o.ref, o.data);
+          else b.set(o.ref, o.data);
+        };
+        for (let i = 0; i < ops.length; i += size) {
+          const part = ops.slice(i, i + size);
+          try {
+            const b = fs.writeBatch(db);
+            part.forEach((o) => apply(b, o));
+            await b.commit();
+          } catch (e) {
+            if (!e || (e.code !== "permission-denied" && e.code !== "invalid-argument" && e.code !== "not-found")) throw e;
+            for (const o of part) {
+              try { const b = fs.writeBatch(db); apply(b, o); await b.commit(); }
+              catch (e2) {
+                if (!e2 || (e2.code !== "permission-denied" && e2.code !== "invalid-argument" && e2.code !== "not-found")) throw e2;
+                console.error("Nem sikerült nullázni:", o.ref.path, e2);
+                sum.failed++;
+              }
+            }
+          }
+        }
+      }
+      const emptyCats = () => { const c = {}; for (const cid of CAT_IDS) c[cid] = {}; return c; };
+      // 1. Felhasználók: napi napló és statisztika.
+      say("Napi naplók és statisztikák…");
+      const users = await fs.getDocs(fs.collection(db, "users"));
+      const statOps = [];
+      const codes = new Set();
+      for (const u of users.docs) {
+        const days = await fs.getDocs(daysColl(u.id));
+        const ops = [];
+        for (const d of days.docs) {
+          const x = d.data() || {};
+          const party = typeof x.party === "string" && /^[a-z0-9-]{3,40}$/.test(x.party) ? x.party : null;
+          if (party) {
+            codes.add(party);
+            const o = { v: 2, cats: emptyCats(), recent: [], party, updatedAt: now };
+            if (Array.isArray(x.mig)) o.mig = x.mig.filter((c) => typeof c === "string").slice(-100);
+            ops.push({ kind: "set", ref: d.ref, data: o });
+          } else ops.push({ kind: "delete", ref: d.ref });
+        }
+        await run(ops, 200);
+        sum.days += days.size;
+        statOps.push({ kind: "update", ref: u.ref, data: { total: {}, years: {}, days: {}, updatedAt: now } });
+        sum.users++;
+      }
+      // A statisztika szabálya a felhasználónevet is ellenőrzi (dokumentumonként 2 olvasás): kis kötegek.
+      await run(statOps, 5);
+      // 2. Bulik: szavazatok törlése, összesítések nullára (a napok után, hogy a telefonok a nullázott napokból számoljanak).
+      // Gyűjteménycsoport-lekérdezéssel, így azok a régi bulik is benne vannak, amelyeknek nincs külön (név-)dokumentuma.
+      say("Bulik…");
+      const inParty = (d) => /^parties\/[^/]+\/(players|votes)\/[^/]+$/.test(d.ref.path);
+      let players, votes;
+      try {
+        [players, votes] = await Promise.all([
+          fs.getDocs(fs.collectionGroup(db, "players")),
+          fs.getDocs(fs.collectionGroup(db, "votes")),
+        ]);
+      } catch (e) {
+        // Tartalék (pl. ha a csoportos lekérdezés szabálya még nincs közzétéve): a bulik listája és a napokból ismert bulik.
+        console.error(e);
+        const ps = await fs.getDocs(fs.collection(db, "parties"));
+        ps.docs.forEach((d) => codes.add(d.id));
+        for (const u of users.docs) {
+          try {
+            const pr = await fs.getDoc(privRef(u.id));
+            if (pr.exists()) Object.keys(objOf(pr.data().parties)).forEach((c) => { if (PARTY_RE.test(c)) codes.add(c); });
+          } catch (e2) { console.error(e2); }
+        }
+        players = { docs: [] };
+        votes = { docs: [] };
+        for (const c of codes) {
+          const [a, b] = await Promise.all([fs.getDocs(fs.collection(db, "parties", c, "players")), fs.getDocs(fs.collection(db, "parties", c, "votes"))]);
+          players.docs.push(...a.docs);
+          votes.docs.push(...b.docs);
+        }
+      }
+      const pOps = [];
+      for (const v of votes.docs.filter(inParty)) { pOps.push({ kind: "delete", ref: v.ref }); sum.votes++; }
+      for (const pl of players.docs.filter(inParty)) {
+        const d = pl.data() || {};
+        const out = { v: 1, name: (typeof d.name === "string" ? d.name.trim().slice(0, 24) : "") || "Névtelen", cats: {}, recent: [], updatedAt: now };
+        for (const cid of CAT_IDS) {
+          const c = d.cats && d.cats[cid] && typeof d.cats[cid] === "object" ? d.cats[cid] : {};
+          out.cats[cid] = {
+            items: [],
+            custom: Array.isArray(c.custom) ? c.custom.filter((x) => typeof x === "string").slice(0, 30) : [],
+            quick: typeof c.quick === "string" ? c.quick : null,
+          };
+        }
+        pOps.push({ kind: "set", ref: pl.ref, data: out });
+        sum.players++;
+      }
+      await run(pOps, 100);
+      // 3. Kocsmák: a tagok havi hányásszáma.
+      say("Kocsmák…");
+      const ks = await fs.getDocs(fs.collection(db, "kocsmak"));
+      for (const k of ks.docs) {
+        const ms = await fs.getDocs(kMembersColl(k.id));
+        const ops = ms.docs.filter((m) => m.data() && "v" in m.data()).map((m) => ({ kind: "update", ref: m.ref, data: { v: fs.deleteField() } }));
+        await run(ops, 100);
+        sum.members += ops.length;
+      }
+      // 4. Jelzés a telefonoknak (dobják el a helyben tárolt számításaikat), és napló.
+      const b = fs.writeBatch(db);
+      b.set(fs.doc(db, "meta", "app"), { resetAt: now });
+      b.set(logRef(), logEntry("resetall", null, null, sum.users + " felhasználó, " + sum.days + " nap, " + sum.players + " buli-összesítés, " + sum.votes + " szavazat"));
+      await b.commit();
+      return sum;
+    },
+    watchMeta(next) {
+      return fs.onSnapshot(fs.doc(db, "meta", "app"), (snap) => next(snap.exists() ? snap.data() : null), () => {});
+    },
     async adminWipe(uid, extraParties, label) {
       const codes = new Set(extraParties || []);
       const p = await fs.getDoc(privRef(uid));
@@ -599,6 +729,8 @@ function hand(backend, problem) {
       }
       const games = await fs.getDocs(gamesColl(uid));
       for (const g of games.docs) refs.push(g.ref);
+      const ug = await fs.getDocs(fs.query(ugColl(), fs.where("uid", "==", uid)));
+      for (const g of ug.docs) refs.push(g.ref);
       for (const c of codes) if (typeof c === "string" && /^[a-z0-9-]{3,40}$/.test(c)) refs.push(playerRef(c, uid), voteRef(c, uid));
       if (key) { const m = await fs.getDoc(nameRef(key)); if (m.exists() && m.data().uid === uid) refs.push(nameRef(key)); }
       refs.push(userRef(uid), privRef(uid));
@@ -796,13 +928,65 @@ function hand(backend, problem) {
     },
 
     /* ----- saját adatok élőben (a kocsmáim listája több telefon között is) ----- */
+    // A második paraméter: a pillanatkép még el nem küldött (helyi) írást tartalmaz-e.
     watchPrivate(next, onError) {
-      return fs.onSnapshot(privRef(user.uid), (snap) => next(snap.exists() ? snap.data() : null), (e) => onError(e));
+      // includeMetadataChanges: akkor is szól, amikor a helyi írás a szerverre ért (a függő állapot megszűnik).
+      return fs.onSnapshot(privRef(user.uid), { includeMetadataChanges: true },
+        (snap) => next(snap.exists() ? snap.data() : null, { pending: !!snap.metadata.hasPendingWrites, fromCache: !!snap.metadata.fromCache }),
+        (e) => onError(e));
     },
 
     /* ----- kocsmák ----- */
+    // A második paraméter: a pillanatkép a helyi gyorsítótárból jön-e (ott a „nincs ilyen” nem biztos).
     watchKocsma(kid, next, onError) {
-      return fs.onSnapshot(kocsmaRef(kid), (snap) => next(snap.exists() ? snap.data() : null), (e) => onError(e));
+      return fs.onSnapshot(kocsmaRef(kid), (snap) => next(snap.exists() ? snap.data() : null, !!snap.metadata.fromCache), (e) => onError(e));
+    },
+    // Mi a helyzet valójában egy kocsmával? Előbb megvárjuk, hogy a saját függő írásaink (pl. az alapítás vagy a belépés)
+    // a szerverre érjenek, utána a szerverről nézzük meg. Ha a figyelés a saját belépésünk előtt ért a szerverre, a szerver
+    // elutasítja, pedig tagok vagyunk: ezt így meg lehet különböztetni a valódi kikerüléstől.
+    // "ok": tag vagyok és megvan; "gone": megszűnt vagy nem vagyok tagja; "orphan": én vagyok az alapítója, de nincs
+    // tagságom (egy korábbi hiba miatt); "banned": le vagyok tiltva.
+    async kocsmaStatus(kid) {
+      try { await fs.waitForPendingWrites(db); } catch (e) {}
+      const denied = (e) => !!e && e.code === "permission-denied";
+      let isMember = false;
+      try { isMember = (await fs.getDocFromServer(kMemberRef(kid, user.uid))).exists(); }
+      catch (e) { if (!denied(e)) throw e; }
+      if (isMember) {
+        try { return (await fs.getDocFromServer(kocsmaRef(kid))).exists() ? "ok" : "gone"; }
+        catch (e) { if (!denied(e)) throw e; }
+      }
+      try { if ((await fs.getDocFromServer(fs.doc(db, "banned", user.uid))).exists()) return "banned"; }
+      catch (e) { if (!denied(e)) throw e; }
+      try {
+        const ks = await fs.getDocFromServer(kocsmaRef(kid));
+        return ks.exists() && ks.data().owner === user.uid ? "orphan" : "gone";
+      } catch (e) { if (denied(e)) return "gone"; throw e; }
+    },
+    // Visszakerülés egy kocsmába, ahonnan egy korábbi hiba miatt kikerültem: az alapító a kocsma kódjával újra belép.
+    // Ha a tagságom megvan, csak a listámra veszem vissza.
+    async reclaimKocsma(kid) {
+      const denied = (e) => !!e && e.code === "permission-denied";
+      let isMember = false;
+      try { isMember = (await fs.getDocFromServer(kMemberRef(kid, user.uid))).exists(); }
+      catch (e) { if (!denied(e)) throw e; }
+      let ks;
+      try { ks = await fs.getDocFromServer(kocsmaRef(kid)); }
+      catch (e) { if (denied(e)) return false; throw e; }
+      if (!ks.exists()) return false;
+      const k = ks.data();
+      const now = Date.now();
+      if (isMember) {
+        await fs.updateDoc(privRef(user.uid), { ["kocsmak." + kid]: now, updatedAt: now });
+        return true;
+      }
+      if (k.owner !== user.uid || !KCODE_RE.test(k.code)) return false;
+      const b = fs.writeBatch(db);
+      b.set(kMemberRef(kid, user.uid), { at: now, code: k.code });
+      b.set(kCodeRef(k.code), { m: { [user.uid]: now } }, { merge: true });
+      b.set(privRef(user.uid), { kocsmak: { [kid]: now }, kmsg: { [kid]: now }, updatedAt: now }, { merge: true });
+      await b.commit();
+      return true;
     },
     watchKMembers(kid, next, onError) {
       return watchColl(fs.query(kMembersColl(kid), fs.limit(200)), next, onError);
@@ -905,6 +1089,10 @@ function hand(backend, problem) {
     setKocsmaParty(kid, party) {
       return fs.setDoc(kocsmaRef(kid), { party, updatedAt: Date.now() }, { merge: true });
     },
+    // A saját, megszavazott hányásaim havi száma ({"ÉÉÉÉ-HH": db}) a kocsma tagsági dokumentumomban.
+    setKVomits(kid, v) {
+      return fs.updateDoc(kMemberRef(kid, user.uid), { v });
+    },
     sendKMessage(kid, text) {
       const ref = fs.doc(kMsgColl(kid));
       return { id: ref.id, done: fs.setDoc(ref, { uid: user.uid, text, at: Date.now() }) };
@@ -962,6 +1150,14 @@ function hand(backend, problem) {
     async getPlayerFresh(party, uid) {
       const s = await fs.getDocFromServer(playerRef(party, uid));
       return s.exists() ? s.data() : null;
+    },
+    // A havi ranglistához: egy buli résztvevői és szavazatai, mindig a szerverről (hiányos gyorsítótárból nem számolunk).
+    async getPartyRoster(party) {
+      const [players, votes] = await Promise.all([
+        fs.getDocsFromServer(fs.collection(db, "parties", party, "players")),
+        fs.getDocsFromServer(fs.collection(db, "parties", party, "votes")),
+      ]);
+      return { players: players.docs.map((d) => d.id), votes: votes.docs.map((d) => ({ id: d.id, data: d.data() })) };
     },
     async getPartyMetaFresh(party) {
       const s = await fs.getDocFromServer(fs.doc(db, "parties", party));
@@ -1027,15 +1223,46 @@ function hand(backend, problem) {
       return fs.setDoc(privRef(user.uid), { drinks, updatedAt: Date.now() }, { merge: true });
     },
 
-    /* ----- saját ivós játékok (csak a felhasználó látja) ----- */
+    /* ----- ivós játékok: a sajátjaim (megosztva vagy sem) és mindenki megosztott játékai ----- */
     watchGames(next, onError) {
-      return watchColl(fs.query(gamesColl(user.uid), fs.limit(500)), next, onError);
+      return watchColl(fs.query(ugColl(), fs.where("uid", "==", user.uid), fs.limit(500)), next, onError);
+    },
+    watchSharedGames(next, onError) {
+      return watchColl(fs.query(ugColl(), fs.where("shared", "==", true), fs.limit(500)), next, onError);
     },
     saveGame(id, data) {
-      const ref = id ? gameRef(user.uid, id) : fs.doc(gamesColl(user.uid));
-      return { id: ref.id, done: fs.setDoc(ref, data) };
+      const ref = id ? ugRef(id) : fs.doc(ugColl());
+      return { id: ref.id, done: fs.setDoc(ref, Object.assign({}, data, { uid: user.uid, shared: !!data.shared })) };
     },
-    deleteGame(id) { return fs.deleteDoc(gameRef(user.uid, id)); },
+    deleteGame(id) { return fs.deleteDoc(ugRef(id)); },
+    // A régi helyen (users/{uid}/games) lévő játékok átköltöztetése, nem megosztva. Az új azonosító a régiből készül,
+    // így ha két telefon egyszerre költöztet, sem keletkezik kettő ugyanabból.
+    async migrateGames() {
+      const old = await fs.getDocsFromServer(gamesColl(user.uid));
+      if (old.empty) return 0;
+      const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+      for (let i = 0; i < old.docs.length; i += 200) {
+        const b = fs.writeBatch(db);
+        for (const d of old.docs.slice(i, i + 200)) {
+          const x = d.data() || {};
+          const now = Date.now();
+          b.set(ugRef(user.uid + "_" + d.id), {
+            uid: user.uid, name: str(x.name, 60), players: str(x.players, 30), tools: str(x.tools, 300), desc: str(x.desc, 2000),
+            shared: false, createdAt: Number(x.createdAt) || now, updatedAt: Number(x.updatedAt) || now,
+          });
+          b.delete(d.ref);
+        }
+        await b.commit();
+      }
+      return old.size;
+    },
+    // A tulajdonos töröl egy megosztott játékot (naplózva).
+    async adminDeleteGame(id, label) {
+      const b = fs.writeBatch(db);
+      b.delete(ugRef(id));
+      b.set(logRef(), logEntry("gdelete", null, null, label));
+      await b.commit();
+    },
 
     /* ----- a buli neve és kezdete ----- */
     watchParty(party, next, onError) {

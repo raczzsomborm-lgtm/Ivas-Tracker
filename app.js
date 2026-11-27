@@ -5,13 +5,13 @@
 
   /* ---------- alapbeállítások ---------- */
   const CATS = [
-    { id: "shot", name: "Rövid", short: "Rövid", emoji: "🥃", ml: 40, pts: 5, quick: "Egyéb", placeholder: "pl. Becherovka",
+    { id: "shot", name: "Rövid", short: "Rövid", ml: 40, pts: 5, quick: "Egyéb", placeholder: "pl. Becherovka",
       defaults: ["Jägermeister", "Unicum", "Pálinka", "Tequila", "Vodka", "Rum", "Whisky", "Gin", "Egyéb"] },
-    { id: "wine", name: "Bor", short: "Bor", emoji: "🍷", ml: 100, pts: 3, quick: "Egyéb", placeholder: "pl. Tokaji",
+    { id: "wine", name: "Bor", short: "Bor", ml: 100, pts: 3, quick: "Egyéb", placeholder: "pl. Tokaji",
       defaults: ["Fehér", "Vörös", "Rozé", "Fröccs", "Pezsgő", "Egyéb"] },
-    { id: "beer", name: "Sör", short: "Sör", emoji: "🍺", ml: 500, pts: 2, quick: "Egyéb", placeholder: "pl. Cider",
+    { id: "beer", name: "Sör", short: "Sör", ml: 500, pts: 2, quick: "Egyéb", placeholder: "pl. Cider",
       defaults: ["Világos", "Barna", "Búza", "IPA", "Egyéb"] },
-    { id: "water", name: "Víz, üdítő", short: "Víz", emoji: "💧", ml: 300, pts: 0.25, quick: "Víz", placeholder: "pl. Kóla", quiet: true,
+    { id: "water", name: "Víz, üdítő", short: "Víz", ml: 300, pts: 0.25, quick: "Víz", placeholder: "pl. Kóla", quiet: true,
       defaults: ["Víz", "Üdítő"] },
   ];
   const CAT_BY_ID = Object.fromEntries(CATS.map(c => [c.id, c]));
@@ -25,7 +25,7 @@
   const PALETTE = ["#E4572E", "#F3A712", "#3BB273", "#2D9CDB", "#9B5DE5", "#F15BB5", "#00B8A9", "#C0A16B"];
   const SVGNS = "http://www.w3.org/2000/svg";
   // A hozzájárulás verziója: ha változik, mindenki újra látja a hozzájárulási képernyőt (a feltételek lényeges módosításakor is emelni kell).
-  const CONSENT_V = "2026-11-27";
+  const CONSENT_V = "2026-11-27c";
   // A Felhasználási feltételek és az Adatkezelési tájékoztató „Utolsó módosítás” dátuma.
   const TERMS_DATE = "2026. november 27.";
   const PRIVACY_DATE = "2026. november 27.";
@@ -201,6 +201,7 @@
     migrated: 0, migrating: false, migrationDone: false, migrationError: false, migrationTimer: null,
     // ivós játékok
     games: new Map(), gamesLoaded: false, gamesError: false, gameQuery: "",
+    sharedGames: new Map(), sharedLoaded: false, sharedError: false, gameTab: "app", gamesMigrated: false,
     sheet: null, fresh: null, invite: null, deleting: false,
     stats: new Map(), statsDelta: { years: {}, days: {} }, statsTimer: null, statsError: false,
     installPrompt: null,
@@ -209,12 +210,15 @@
     // kocsmák
     privK: null,                 // a private.kocsmak: kocsma azonosító → belépés ideje (a kocsmáim)
     kocsmak: new Map(),          // kocsma azonosító → { name, icon, code, owner, party, createdAt } (élő)
-    kUnsubs: new Map(),
+    kUnsubs: new Map(), kVerifying: new Set(), kRetry: new Map(), kRecheck: new Set(), privKmsg: [], privServer: false, orphanScan: false,
     kocsma: null,                // az aktív kocsma
     kMembers: new Map(), kMembersLoaded: false, kMembersUnsub: null,
     kMsgs: [], kMsgsLoaded: false, kMsgsFull: false, kMsgsError: false, kMsgsUnsub: null, kMsgLimit: MSG_PAGE,
     kScreen: null, kUser: null, kMonth: null, kLeaving: new Set(), kInvite: null, chatScrollDown: false,
     kMembersServer: null, kClaiming: false, kClaimTimer: null, kRepaired: new Set(),
+    // a saját, bulikon megszavazott hányásaim hónaponként (a havi ranglistához)
+    myVomits: null, vParties: null, vGen: 0, vTimer: null, vBusy: false, vAgain: false, vSig: "", vAll: false, vDirty: new Set(), kVSent: new Map(),
+    playersFresh: false, votesFresh: false,
     // barátok
     friends: new Map(), friendsLoaded: false, reqIn: new Map(), reqOut: new Map(), socialError: false,
     dismissing: new Set(), profUser: null,
@@ -601,12 +605,14 @@
   }
   function myVote(subject) { const on = S.votes.get(S.myId); return (on && on[subject]) || null; }
   // A többiek szavaznak (aki hányt, az nem). Büntetés, ha a többiek több mint fele igennel szavaz.
-  function vomitInfo(subject) {
-    const eligible = [...allPeople().keys()].filter(id => id !== subject);
+  function vomitInfo(subject) { return vomitCalc(subject, allPeople().keys(), S.votes); }
+  // Ugyanez a számolás a havi ranglistához is (a buli résztvevői és szavazatai alapján).
+  function vomitCalc(subject, playerIds, votes) {
+    const eligible = [...playerIds].filter(id => id !== subject);
     let yes = 0, no = 0;
     const ns = [];
     for (const id of eligible) {
-      const on = S.votes.get(id);
+      const on = votes.get(id);
       const e = on && on[subject];
       if (!e) continue;
       if (e.v === true) yes++;
@@ -755,6 +761,8 @@
     S.docs = new Map();
     S.votes = new Map();
     S.votesError = false;
+    S.playersFresh = false;
+    S.votesFresh = false;
     S.stale = false;
     S.partyMeta = null;
     S.partyLoaded = false;
@@ -800,6 +808,8 @@
         for (const d of snap.docs) m.set(d.id, sanitizeVotes(d.data));
         S.votes = m;
         S.votesError = false;
+        S.votesFresh = !snap.fromCache;
+        partyVomitsChanged(party);
         if (S.phase === "ready") renderAll();
       }, (e) => {
         if (S.party !== party) return;
@@ -998,10 +1008,13 @@
     } finally {
       S.migrating = false;
     }
-    if (S.migrationDone) { flushDerive(); checkMyParty(); }
+    if (S.migrationDone) { flushDerive(); checkMyParty(); if (S.phase === "ready") scheduleVomits(); }
     if (S.phase === "ready") renderAll();
   }
-  window.addEventListener("online", () => { if (S.phase === "ready" && !S.migrationDone) runMigration(); });
+  window.addEventListener("online", () => {
+    if (S.phase === "ready" && !S.migrationDone) runMigration();
+    if (S.phase === "ready") scheduleVomits();
+  });
 
   /* ---------- fiók ---------- */
   function restart(ms) { setTimeout(() => { try { location.reload(); } catch (e) {} }, ms || 60); }
@@ -1193,7 +1206,7 @@
       else say(authErrorText(e), true);
       return;
     }
-    for (const k of ["strigula-party", "strigula-parties", "strigula-hidden-parties", "strigula-units", "strigula-install-hidden", "strigula-pending-email", "strigula-id", "strigula-name", "masnaplo-kocsma", "masnaplo-chat-read"]) lsSet(k, null);
+    for (const k of ["strigula-party", "strigula-parties", "strigula-hidden-parties", "strigula-units", "strigula-install-hidden", "strigula-pending-email", "strigula-id", "strigula-name", "masnaplo-kocsma", "masnaplo-chat-read", "masnaplo-vomits", "masnaplo-vsent", "masnaplo-kchecked", "masnaplo-theme"]) lsSet(k, null);
     S.phase = "boot";
     say("A fiókodat és az adataidat töröltük. Viszlát!");
     restart(1800);
@@ -1224,6 +1237,9 @@
     flushAll();
     lsSet("masnaplo-kocsma", null);
     lsSet("masnaplo-chat-read", null);
+    lsSet("masnaplo-vomits", null);
+    lsSet("masnaplo-vsent", null);
+    lsSet("masnaplo-kchecked", null);
     try { await S.backend.signOut(); } catch (e) {}
     restart();
   }
@@ -1240,10 +1256,13 @@
     S.unsub = S.backend.watchPlayers(party, (snap) => {
       if (S.party !== party) return;
       if (!snap.fromCache) { clearTimeout(timer); S.stale = false; }
+      S.playersFresh = !snap.fromCache;
       const m = new Map();
       for (const d of snap.docs) m.set(d.id, sanitize(d.data));
       S.docs = m;
       S.partyLoaded = true;
+      // Új résztvevővel a szavazók száma, és vele a hányás megszavazásához kellő igenek száma is változhat.
+      partyVomitsChanged(party);
       checkMyParty();
       renderAll();
     }, (e) => {
@@ -1288,7 +1307,7 @@
         const was = S.daysSynced;
         if (!snap.fromCache) S.daysSynced = true;
         learnParties();
-        if (S.daysSynced) { if (!was) flushDerive(); checkMyParty(); }
+        if (S.daysSynced) { if (!was) flushDerive(); checkMyParty(); scheduleVomits(); }
         if (S.phase === "ready") { renderAll(); maybeInvite(); }
       }, (e) => {
         S.daysLoaded = true;
@@ -1307,6 +1326,7 @@
     return {
       name: cleanLine(str(d.name), GAME_MAX.name), players: cleanLine(str(d.players), GAME_MAX.players),
       tools: cleanLine(str(d.tools), GAME_MAX.tools), desc: cleanText(str(d.desc), GAME_MAX.desc),
+      uid: str(d.uid), shared: d.shared === true,
       createdAt: num(d.createdAt), updatedAt: num(d.updatedAt),
     };
   }
@@ -1326,6 +1346,28 @@
         if (S.phase === "ready") renderAll();
       });
     } catch (e) {}
+    // Mindenki megosztott játékai (a „Felhasználók játékai” fülhöz).
+    if (typeof S.backend.watchSharedGames !== "function") { S.sharedLoaded = true; return; }
+    try {
+      S.backend.watchSharedGames((snap) => {
+        const m = new Map();
+        for (const d of snap.docs) { const g = sanitizeGame(d.data); if (g.uid && g.shared) m.set(d.id, g); }
+        S.sharedGames = m;
+        S.sharedLoaded = true;
+        S.sharedError = false;
+        if (S.phase === "ready") renderAll();
+      }, (e) => {
+        S.sharedLoaded = true;
+        if (errCode(e) === "permission-denied") S.sharedError = true;
+        if (S.phase === "ready") renderAll();
+      });
+    } catch (e) {}
+  }
+  // A régi helyen tárolt saját játékok átköltöztetése (egyszer, a háttérben; ha nem sikerül, a következő indításkor újra).
+  function maybeMigrateGames() {
+    if (S.gamesMigrated || !canEdit() || typeof S.backend.migrateGames !== "function") return;
+    S.gamesMigrated = true;
+    Promise.resolve().then(() => S.backend.migrateGames()).catch((e) => { console.error(e); });
   }
   /* ---------- barátok és kocsmák: adatok ---------- */
   function cleanKName(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().slice(0, KNAME_MAX); }
@@ -1354,6 +1396,16 @@
       owner: typeof src.owner === "string" ? src.owner : "",
       party, createdAt: num(src.createdAt),
     };
+  }
+  function sanitizeVMap(v) {
+    const o = {};
+    if (v && typeof v === "object") {
+      for (const [k, n] of Object.entries(v)) {
+        const x = Math.floor(Number(n));
+        if (/^\d{4}-\d{2}$/.test(k) && x > 0) o[k] = Math.min(999, x);
+      }
+    }
+    return o;
   }
   function sanitizeMsg(id, d) {
     if (!d || typeof d.uid !== "string" || typeof d.text !== "string") return null;
@@ -1405,12 +1457,19 @@
   function subscribePrivate() {
     if (typeof S.backend.watchPrivate !== "function") return;
     try {
-      S.backend.watchPrivate((data) => {
+      S.backend.watchPrivate((data, meta) => {
         const src = data && data.kocsmak && typeof data.kocsmak === "object" ? data.kocsmak : {};
         const next = {};
         for (const [kid, at] of Object.entries(src)) if (KID_RE.test(kid)) next[kid] = num(at) || 1;
+        // Egy még el nem küldött (helyi) írásból származó új kocsmát nem kezdünk figyelni: a figyelés a belépésünk előtt
+        // érhetne a szerverre, és az elutasítaná. Az alapítás és a belépés a sikeres mentés után maga veszi fel a listára.
+        if (meta && meta.pending && S.privK) for (const kid of Object.keys(next)) if (!(kid in S.privK)) delete next[kid];
         S.privK = next;
+        const km = data && data.kmsg && typeof data.kmsg === "object" ? data.kmsg : {};
+        S.privKmsg = Object.keys(km).filter(kid => KID_RE.test(kid));
+        if (meta && !meta.pending && !meta.fromCache) S.privServer = true;
         syncKocsmak();
+        maybeScanOrphans();
         if (S.phase === "ready") renderAll();
       }, (e) => { if (errCode(e) === "permission-denied") checkBanned(); });
     } catch (e) {}
@@ -1426,20 +1485,93 @@
   function watchK(kid) {
     let unsub = null;
     try {
-      unsub = S.backend.watchKocsma(kid, (data) => {
+      unsub = S.backend.watchKocsma(kid, (data, fromCache) => {
         if (!S.kUnsubs.has(kid)) return;
-        if (!data) { lostKocsma(kid); return; }
+        // „Nincs ilyen” csak a szervertől számít, és akkor is előbb ellenőrizzük.
+        if (!data) { if (!fromCache) verifyKocsma(kid); return; }
+        S.kRetry.delete(kid);
         S.kocsmak.set(kid, sanitizeKocsma(data));
         ensureActive();
+        syncKVomits();
         if (S.kocsma === kid) maybeClaimKocsma();
         if (S.kocsma === kid && data.party && data.party.code) fetchPartyNames([data.party.code]);
         if (S.phase === "ready") renderAll();
-      }, (e) => {
+      }, () => {
+        // A figyelést a szerver leállította (pl. mert a belépésünk még úton volt): kiderítjük, mi a helyzet.
         if (!S.kUnsubs.has(kid)) return;
-        if (errCode(e) === "permission-denied") lostKocsma(kid);
+        verifyKocsma(kid);
       });
     } catch (e) {}
     S.kUnsubs.set(kid, unsub || (() => {}));
+  }
+  // Egy kocsma figyelése hibát adott vagy „nincs ilyen”-t mondott. Csak akkor takarítunk (lostKocsma), ha a szerver szerint
+  // valóban megszűnt, vagy már nem vagyok tagja; ha tag vagyok, újraindítjuk a figyelést; offline később újra megnézzük.
+  async function verifyKocsma(kid) {
+    if (S.kVerifying.has(kid) || typeof S.backend.kocsmaStatus !== "function") return;
+    if (!(S.privK && kid in S.privK) && !S.kUnsubs.has(kid)) return;
+    S.kVerifying.add(kid);
+    let st = "error";
+    try { st = await S.backend.kocsmaStatus(kid); } catch (e) { st = "error"; }
+    S.kVerifying.delete(kid);
+    if (!(S.privK && kid in S.privK) && !S.kUnsubs.has(kid)) return;
+    if (S.kLeaving.has(kid)) { lostKocsma(kid); return; }
+    if (st === "ok") {
+      const n = (S.kRetry.get(kid) || 0) + 1;
+      S.kRetry.set(kid, n);
+      if (n <= 5) setTimeout(() => restartK(kid), n === 1 ? 0 : 2000 * n);
+    } else if (st === "orphan") {
+      try {
+        if (await S.backend.reclaimKocsma(kid)) { S.privK = Object.assign({}, S.privK || {}, { [kid]: Date.now() }); restartK(kid); }
+      } catch (e) { S.kRecheck.add(kid); }
+    } else if (st === "banned") {
+      stopK(kid);
+      checkBanned();
+      if (S.phase === "ready") renderAll();
+    } else if (st === "gone") {
+      lostKocsma(kid);
+    } else {
+      // offline vagy hiba: a kocsma a listán marad, és később újra megnézzük
+      S.kRecheck.add(kid);
+      setTimeout(() => { if (S.kRecheck.delete(kid)) verifyKocsma(kid); }, 30000);
+    }
+  }
+  // A kocsma (és ha ez az aktív, a tagok és a chat) figyelésének újraindítása.
+  function restartK(kid) {
+    if (!(S.privK && kid in S.privK)) return;
+    const u = S.kUnsubs.get(kid);
+    S.kUnsubs.delete(kid);
+    if (u) { try { u(); } catch (e) {} }
+    watchK(kid);
+    if (S.kocsma === kid) {
+      if (S.kMembersUnsub) { try { S.kMembersUnsub(); } catch (e) {} S.kMembersUnsub = null; }
+      subscribeKMembers();
+      subscribeKMsgs();
+    }
+    ensureActive();
+    if (S.phase === "ready") renderAll();
+  }
+  // Egy korábbi hiba miatt kikerülhetett az alapító a saját kocsmájából (a lista és a tagság törlődött, a kocsma megmaradt).
+  // Indításkor egyszer megnézzük azokat a kocsmákat, ahol valaha tag voltam, de most nincsenek a listámon: ha én vagyok az
+  // alapítójuk, visszalépek. A már megnézetteket megjegyezzük, hogy ne kelljen újra.
+  function maybeScanOrphans() {
+    if (S.orphanScan || S.phase !== "ready" || !S.privServer || typeof S.backend.reclaimKocsma !== "function" || !canEdit()) return;
+    S.orphanScan = true;
+    let checked = [];
+    try { const o = JSON.parse(lsGet("masnaplo-kchecked") || "null"); if (o && o.uid === S.myId && Array.isArray(o.ids)) checked = o.ids; } catch (e) {}
+    const todo = S.privKmsg.filter(kid => !(S.privK && kid in S.privK) && !checked.includes(kid)).slice(0, 20);
+    if (!todo.length) return;
+    (async () => {
+      for (const kid of todo) {
+        try {
+          if (await S.backend.reclaimKocsma(kid)) {
+            S.privK = Object.assign({}, S.privK || {}, { [kid]: Date.now() });
+            syncKocsmak();
+            if (S.phase === "ready") renderAll();
+          } else checked.push(kid);
+        } catch (e) { /* offline: legközelebb */ }
+      }
+      lsSet("masnaplo-kchecked", JSON.stringify({ uid: S.myId, ids: checked.slice(-200) }));
+    })();
   }
   function stopK(kid) {
     const u = S.kUnsubs.get(kid);
@@ -1503,18 +1635,18 @@
       S.kMembersUnsub = S.backend.watchKMembers(kid, (snap) => {
         if (S.kocsma !== kid) return;
         const m = new Map();
-        for (const d of snap.docs) m.set(d.id, { at: num(d.data && d.data.at) });
+        for (const d of snap.docs) m.set(d.id, { at: num(d.data && d.data.at), v: sanitizeVMap(d.data && d.data.v) });
         S.kMembers = m;
         S.kMembersLoaded = true;
         // A szerver szerint már nem vagyok tag (pl. az alapító eltávolított).
-        if (!snap.fromCache && !m.has(S.myId) && !S.kLeaving.has(kid)) { lostKocsma(kid); return; }
-        if (!snap.fromCache) S.kMembersServer = kid;
+        if (!snap.fromCache && !m.has(S.myId) && !S.kLeaving.has(kid)) { verifyKocsma(kid); return; }
+        if (!snap.fromCache) { S.kMembersServer = kid; syncKVomits(); }
         maybeClaimKocsma();
         maybeRepairKCode();
         if (S.phase === "ready") renderAll();
-      }, (e) => {
+      }, () => {
         if (S.kocsma !== kid) return;
-        if (errCode(e) === "permission-denied") lostKocsma(kid);
+        verifyKocsma(kid);
       });
     } catch (e) {}
   }
@@ -1573,7 +1705,7 @@
         if (S.phase === "ready") renderAll();
       }, (e) => {
         if (S.kocsma !== kid) return;
-        if (errCode(e) === "permission-denied") { S.kMsgsError = true; S.kMsgsLoaded = true; if (S.phase === "ready") renderAll(); }
+        if (errCode(e) === "permission-denied") { S.kMsgsError = true; S.kMsgsLoaded = true; verifyKocsma(kid); if (S.phase === "ready") renderAll(); }
       });
     } catch (e) {}
   }
@@ -1740,6 +1872,9 @@
     say("Belépés…");
     try {
       await S.backend.joinKocsma(kid, code);
+      // Új tagsági dokumentum: a hányásszámot újra be kell írni (ha korábban már tag voltam itt).
+      S.kVSent.delete(kid);
+      vSentSave(kid, null);
       S.privK = Object.assign({}, S.privK || {}, { [kid]: Date.now() });
       S.kocsmak.set(kid, { name: preview.name, icon: preview.icon, code, owner: "", party: null, createdAt: 0 });
       syncKocsmak();
@@ -1881,6 +2016,179 @@
     }
   }
 
+  /* ---------- hányások a havi ranglistához ----------
+     A saját hányásaimat (amit a buli többi résztvevője megszavazott, ugyanazzal a szabállyal, mint a buli versenyében)
+     a telefonom számolja ki a bulijaim szavazataiból, és hónaponként beírja a kocsmáim tagsági dokumentumába (v).
+     Egy buli annak a hónapnak számít, amelyikben az első, hozzá rendelt napom van. */
+  function myPartyFirstDays() {
+    const m = new Map();
+    for (const [k, d] of S.days) if (d.party && (!m.has(d.party) || k < m.get(d.party))) m.set(d.party, k);
+    return m;
+  }
+  function vomitSig() { return [...myPartyFirstDays()].map(([c, k]) => c + "@" + k).sort().join(","); }
+  // Bulinkénti eredmény ({kód: hányások száma}) ezen a telefonon, hogy ne kelljen mindig minden bulit letölteni.
+  function loadVomitCache() {
+    try {
+      const o = JSON.parse(lsGet("masnaplo-vomits") || "null");
+      if (o && o.uid === S.myId && o.p && typeof o.p === "object") {
+        const p = {};
+        for (const [c, n] of Object.entries(o.p)) {
+          const x = Math.floor(Number(n));
+          if (cleanParty(c) === c && x >= 0) p[c] = Math.min(999, x);
+        }
+        return p;
+      }
+    } catch (e) {}
+    return null;
+  }
+  // Havi összeg: minden buli annak a hónapnak számít, amelyikben az első, hozzá rendelt napom van.
+  function vomitMonths(perParty, first) {
+    const m = {};
+    for (const [code, k] of first) {
+      const n = num(perParty[code]);
+      if (n > 0) m[k.slice(0, 7)] = Math.min(999, (m[k.slice(0, 7)] || 0) + n);
+    }
+    // A szabály legfeljebb 120 hónapot enged a kocsmában: a legrégebbiek maradnak ki.
+    const keys = Object.keys(m).sort();
+    for (const k of keys.slice(0, Math.max(0, keys.length - 120))) delete m[k];
+    return m;
+  }
+  // A tulajdonos „minden fogyasztás nullázása” jelzése (meta/app.resetAt): a helyben tárolt hányás-számításokat eldobjuk.
+  function subscribeMeta() {
+    if (typeof S.backend.watchMeta !== "function") return;
+    try {
+      S.backend.watchMeta((d) => {
+        const at = d ? num(d.resetAt) : 0;
+        if (!at || at <= num(lsGet("masnaplo-reset"))) return;
+        lsSet("masnaplo-reset", String(at));
+        lsSet("masnaplo-vomits", null);
+        lsSet("masnaplo-vsent", null);
+        S.vGen++;
+        S.vParties = null;
+        S.myVomits = null;
+        S.vSig = "";
+        S.kVSent.clear();
+        scheduleVomits("all");
+        if (S.phase === "ready") renderAll();
+      });
+    } catch (e) {}
+  }
+  // A most megnyitott buli élő adataiból (a verseny is ebből számol), ha azok a szerverről jöttek: nem kell letölteni.
+  function liveVomits(code) {
+    if (code !== S.party || !S.playersFresh || !S.votesFresh || S.votesError) return null;
+    return vomitInfo(S.myId).count;
+  }
+  // A megnyitott buliban változott a résztvevők köre vagy a szavazás: ha az enyém is változhatott, újraszámolom.
+  function partyVomitsChanged(party) {
+    if (S.party !== party || !myPartyDays(party).length) return;
+    const live = liveVomits(party);
+    if (live !== null && S.vParties && S.vParties[party] === live) return;
+    scheduleVomits(party);
+  }
+  // Újraszámolás kérése. what: "all" = induláskor az aktuális és az előző havi bulik újra a szerverről;
+  // egy buli kódja = csak az az egy; semmi = csak ha a bulijaim (napjaim) változtak.
+  function scheduleVomits(what) {
+    if (what === "all") S.vAll = true;
+    else if (what) S.vDirty.add(what);
+    else if (!S.vAll && !S.vDirty.size && S.myVomits && vomitSig() === S.vSig) return;
+    clearTimeout(S.vTimer);
+    S.vTimer = setTimeout(refreshMyVomits, 1500);
+  }
+  async function refreshMyVomits() {
+    S.vTimer = null;
+    if (S.vBusy) { S.vAgain = true; return; }
+    if (!S.backend || typeof S.backend.getPartyRoster !== "function" || !S.daysSynced || !S.migrationDone || S.phase !== "ready") return;
+    S.vBusy = true;
+    const uid = S.myId;
+    const gen = S.vGen;
+    const all = S.vAll, dirty = new Set(S.vDirty);
+    S.vAll = false;
+    S.vDirty.clear();
+    try {
+      const cache = S.vParties || loadVomitCache();
+      const recent = new Set([curMonth(), shiftMonth(curMonth(), -1)]);
+      const first = myPartyFirstDays();
+      // Letöltjük: amit még nem számoltunk ki ezen a telefonon, amit kértek, és induláskor az aktuális és előző havi bulikat
+      // (ezekben még változhat a szavazás). A régebbieket a tárolt eredményből vesszük.
+      const fresh = {};
+      for (const [code, k] of first) {
+        const need = !cache || !(code in cache) || dirty.has(code) || (all && recent.has(k.slice(0, 7)));
+        if (!need) continue;
+        let n = liveVomits(code);
+        if (n === null) {
+          const r = await S.backend.getPartyRoster(code);
+          const votes = new Map(r.votes.map(v => [v.id, sanitizeVotes(v.data)]));
+          n = vomitCalc(uid, r.players, votes).count;
+        }
+        fresh[code] = n;
+      }
+      if (S.myId !== uid) return;
+      // Közben a tulajdonos mindent nullázott: ezt az eredményt eldobjuk, és újraszámolunk.
+      if (S.vGen !== gen) { S.vAgain = true; return; }
+      // Közben megváltozhattak a napjaim: a friss állapotból számolunk, a még nem látott bulikat legközelebb.
+      const now = myPartyFirstDays();
+      const per = {};
+      let missing = false;
+      for (const code of now.keys()) {
+        if (code in fresh) per[code] = fresh[code];
+        else if (cache && code in cache) per[code] = cache[code];
+        else missing = true;
+      }
+      S.vParties = per;
+      S.myVomits = vomitMonths(per, now);
+      S.vSig = missing ? "" : vomitSig();
+      lsSet("masnaplo-vomits", JSON.stringify({ uid, p: per }));
+      syncKVomits();
+      if (S.phase === "ready") renderAll();
+      if (missing) S.vAgain = true;
+    } catch (e) {
+      // offline vagy nem elérhető: hiányos adatból nem számolunk; a kérést megőrizzük a következő alkalomra
+      if (all) S.vAll = true;
+      for (const c of dirty) S.vDirty.add(c);
+    } finally {
+      S.vBusy = false;
+      if (S.vAgain) { S.vAgain = false; scheduleVomits(); }
+    }
+  }
+  function vKey(m) { return JSON.stringify(Object.keys(m || {}).sort().map(k => [k, m[k]])); }
+  // Melyik kocsmába mit írtam már be (ezen a telefonon), hogy ne írjuk újra minden indításkor.
+  function vSentLoad() {
+    try {
+      const o = JSON.parse(lsGet("masnaplo-vsent") || "null");
+      if (o && o.uid === S.myId && o.s && typeof o.s === "object") return o.s;
+    } catch (e) {}
+    return {};
+  }
+  function vSentSave(kid, want) {
+    const s = vSentLoad();
+    if (want === null) delete s[kid]; else s[kid] = want;
+    for (const k of Object.keys(s)) if (!S.kocsmak.has(k) && k !== kid) delete s[k];
+    lsSet("masnaplo-vsent", JSON.stringify({ uid: S.myId, s }));
+  }
+  // A kocsmáimba beírom a hányásaim havi számát, ha ott még nem ez áll.
+  // Egy kocsmába munkamenetenként egy értéket legfeljebb egyszer írunk (két telefon ne írja felül egymást oda-vissza).
+  function syncKVomits() {
+    if (!S.myVomits || !canEdit() || typeof S.backend.setKVomits !== "function") return;
+    const want = vKey(S.myVomits);
+    const stored = vSentLoad();
+    for (const kid of S.kocsmak.keys()) {
+      if (S.kLeaving.has(kid)) continue;
+      const seen = kid === S.kocsma && S.kMembersServer === kid && S.kMembers.has(S.myId);
+      if (seen && vKey(S.kMembers.get(S.myId).v) === want) {
+        S.kVSent.set(kid, want);
+        if (stored[kid] !== want) vSentSave(kid, want);
+        continue;
+      }
+      if (S.kVSent.get(kid) === want) continue;
+      if (!seen && stored[kid] === want) continue;
+      S.kVSent.set(kid, want);
+      const data = Object.assign({}, S.myVomits);
+      Promise.resolve().then(() => S.backend.setKVomits(kid, data))
+        .then(() => { if (S.kocsmak.has(kid)) vSentSave(kid, want); })
+        .catch(() => { if (S.kVSent.get(kid) === want) S.kVSent.delete(kid); });
+    }
+  }
+
   /* ---------- havi ranglista ---------- */
   function curMonth() { return todayKey().slice(0, 7); }
   function shiftMonth(ym, n) {
@@ -1903,8 +2211,19 @@
     return o;
   }
   function countsPts(c) { return CATS.reduce((s, cat) => s + cat.pts * Math.max(0, c[cat.id]), 0); }
+  // Egy tag megszavazott hányásai egy hónapban: a sajátomat itt számolom, a többiekét a tagságuk dokumentumából olvasom.
+  function monthVomits(uid, ym) {
+    if (uid === S.myId && S.myVomits) return num(S.myVomits[ym]);
+    const m = S.kMembers.get(uid);
+    return m && m.v ? num(m.v[ym]) : 0;
+  }
+  function monthPts(uid, ym) { return countsPts(monthCounts(uid, ym)) - VOMIT_PTS * monthVomits(uid, ym); }
   function monthRows(ym) {
-    const rows = [...S.kMembers.keys()].map(uid => { const c = monthCounts(uid, ym); return { uid, c, pts: countsPts(c) }; });
+    const rows = [...S.kMembers.keys()].map(uid => {
+      const c = monthCounts(uid, ym);
+      const vomits = monthVomits(uid, ym);
+      return { uid, c, vomits, pts: countsPts(c) - VOMIT_PTS * vomits };
+    });
     rows.sort((a, b) => b.pts - a.pts || byName(a.uid, b.uid));
     for (const r of rows) r.rank = 1 + rows.filter(o => o.pts > r.pts).length;
     return rows;
@@ -1950,6 +2269,7 @@
     subscribeDays();
     subscribeGames();
     subscribePrivate();
+    subscribeMeta();
     syncKocsmak();
     subscribeSocial();
     if (S.isOwner && typeof S.backend.watchBans === "function") {
@@ -1965,6 +2285,9 @@
     flushDerive();
     checkMyParty();
     maybeInvite();
+    scheduleVomits("all");
+    maybeScanOrphans();
+    maybeMigrateGames();
   }
 
   /* ---------- ikonok ---------- */
@@ -1975,6 +2298,7 @@
   const ICON_MUG = '<svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h10v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M15 11.5h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2"/><path d="M5 9a2.5 2.5 0 0 1 2.5-3 3 3 0 0 1 5 0A2.5 2.5 0 0 1 15 9"/><line x1="8.5" y1="12" x2="8.5" y2="18"/><line x1="11.5" y1="12" x2="11.5" y2="18"/></svg>';
   const ICON_PIN = SVG_OPEN + '<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.6"/></svg>';
   const ICON_BACK = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg>';
+  const ICON_MEDAL = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.2 2.8h3.4l2.1 4.3"/><path d="M16.8 2.8h-3.4l-1.4 2.9"/><circle cx="12" cy="14.7" r="6.2"/><path d="m12 11.3 1.05 2.1 2.3.35-1.67 1.62.4 2.3L12 16.6l-2.08 1.07.4-2.3-1.67-1.62 2.3-.35Z"/></svg>';
   const ICON_NEXT = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>';
   const ICON_SEARCH = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><line x1="16" y1="16" x2="20.5" y2="20.5"/></svg>';
   const ICON_CHAT = SVG_OPEN + '<path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.4-4.6A7.5 7.5 0 1 1 20 12.5z"/></svg>';
@@ -1982,7 +2306,65 @@
   const ICON_INVITE = SVG_OPEN + '<circle cx="9.5" cy="8" r="3.5"/><path d="M3 20a6.5 6.5 0 0 1 13 0"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="16" y1="11" x2="22" y2="11"/></svg>';
   const ICON_GEAR = SVG_OPEN + '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
   const ICON_SWAP = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 9 12 4 17 9"/><polyline points="7 15 12 20 17 15"/></svg>';
+  /* ---------- megjelenés: világos, sötét vagy automatikus (a telefon beállítása szerint) ---------- */
+  const THEME_COLORS = { light: "#EDF0EA", dark: "#18231F" };
+  function themeChoice() { const t = lsGet("masnaplo-theme"); return t === "light" || t === "dark" ? t : "auto"; }
+  function applyTheme(t) {
+    const root = document.documentElement;
+    if (t === "light" || t === "dark") root.setAttribute("data-theme", t); else root.removeAttribute("data-theme");
+    // A böngésző sávjának színe: választott témánál mindkét meta azt mutatja, automatikusnál a média-feltétel dönt.
+    const metas = document.querySelectorAll('meta[name="theme-color"]');
+    metas.forEach((m) => {
+      const media = m.getAttribute("media") || "";
+      const own = media.includes("dark") ? THEME_COLORS.dark : THEME_COLORS.light;
+      m.setAttribute("content", t === "light" || t === "dark" ? THEME_COLORS[t] : own);
+    });
+  }
+  function setTheme(t) {
+    lsSet("masnaplo-theme", t === "light" || t === "dark" ? t : null);
+    applyTheme(themeChoice());
+  }
   function iconSpan(html, cls) { const s = el("span", { class: cls || "ico", "aria-hidden": "true" }); s.innerHTML = html; return s; }
+  // Ital-ikonok (vektorgrafika az emojik helyett): 24×24-es vonalas rajzok, a folyadék halványan kitöltve; a szín currentColor.
+  const CAT_SVG = (() => {
+    const O = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">';
+    const L = 'fill="currentColor" fill-opacity=".3" stroke="none"';
+    return {
+      shot: O +
+        `<path ${L} d="M7.75 12.4h8.5l-.72 5.9H8.47Z"/>` +
+        '<path fill="currentColor" stroke="none" d="M8.47 18.3h7.06l-.2 1.55a.9.9 0 0 1-.9.8H9.57a.9.9 0 0 1-.9-.8Z"/>' +
+        '<path d="M6.2 8.6h11.6l-1.4 11.2a2 2 0 0 1-2 1.75H9.6a2 2 0 0 1-2-1.75Z"/>' +
+        '<path d="M7.75 12.4h8.5"/></svg>',
+      wine: O +
+        `<path ${L} d="M7.15 7.6h9.7a4.85 4.85 0 0 1-9.7 0Z"/>` +
+        '<path d="M7.6 2.9h8.8l.6 4.4a5 5 0 0 1-10 0Z"/>' +
+        '<path d="M7.15 7.6h9.7"/><path d="M12 12.3v7.6"/><path d="M8.3 20.9h7.4"/></svg>',
+      beer: O +
+        `<path ${L} d="M6.4 9h8.2v9.8a1.4 1.4 0 0 1-1.4 1.4H7.8a1.4 1.4 0 0 1-1.4-1.4Z"/>` +
+        '<path d="M5.4 8.1h10.2v11a2 2 0 0 1-2 2H7.4a2 2 0 0 1-2-2Z"/>' +
+        '<path d="M15.6 10.4h2a2.4 2.4 0 0 1 2.4 2.4v2.4a2.4 2.4 0 0 1-2.4 2.4h-2"/>' +
+        '<path d="M5.2 8.1a2.3 2.3 0 0 1 1.9-3.6 2.9 2.9 0 0 1 5-.7 2.6 2.6 0 0 1 3.9 2.1 1.5 1.5 0 0 1-.4 2.2"/>' +
+        '<path d="M8.9 11.6v6.4"/><path d="M12.1 11.6v6.4"/></svg>',
+      water: O +
+        `<path ${L} d="M7.3 12.1c1.15-.75 2.3-.75 3.45 0s2.3.75 3.45 0 1.75-.65 2.5-.25l-.75 8.15a1.3 1.3 0 0 1-1.3 1.2h-5.3a1.3 1.3 0 0 1-1.3-1.2Z"/>` +
+        '<path d="M6.3 6.6h11.4l-1.3 13.4a1.9 1.9 0 0 1-1.9 1.7H9.5a1.9 1.9 0 0 1-1.9-1.7Z"/>' +
+        '<path d="M7.3 12.1c1.15-.75 2.3-.75 3.45 0s2.3.75 3.45 0 1.75-.65 2.5-.25"/>' +
+        '<path d="M11.2 17.4 14.6 2.6h2.6"/></svg>',
+    };
+  })();
+  // Egy kategória ikonja, a kategória színével.
+  function catIcon(cid, cls) {
+    const s = iconSpan(CAT_SVG[cid] || "", "cat-ico" + (cls ? " " + cls : ""));
+    s.style.color = "var(--" + cid + ")";
+    return s;
+  }
+  // Darabszámok sora ikonokkal (pl. a ranglistákon): kategóriánként ikon + szám, a végén a hányás.
+  function countsLine(get, vomits, cls, cats) {
+    const out = el("span", { class: (cls || "p-sub") + " cnts" });
+    for (const c of cats || CATS) out.append(el("span", { class: "cnt" }, catIcon(c.id), el("span", { text: String(get(c)) })));
+    if (vomits) out.append(el("span", { class: "cnt", text: "🤮 " + vomits }));
+    return out;
+  }
 
   /* ---------- keret: alsó sáv és lebegő gombok ---------- */
   const NAV = [
@@ -2226,7 +2608,7 @@
       grid.append(el("div", { class: "tile" + (cat.quiet ? " quiet" : ""), style: "--c: var(--" + cat.id + ")" },
         el("button", { type: "button", class: "tile-open", "aria-label": cat.name + ", ma " + n + " darab. Fajta választása",
           onclick: () => openSheet({ type: "daycat", day: key, cid: cat.id }) },
-          el("span", { class: "tile-emoji", "aria-hidden": "true", text: cat.emoji }),
+          catIcon(cat.id, "tile-ico"),
           el("span", { class: "tile-num cond" + (S.fresh === key + "|" + cat.id ? " pop" : ""), text: String(n) }),
           el("span", { class: "tile-name", text: cat.short }),
           el("span", { class: "tile-q", text: q === "Egyéb" ? "egyéb" : q })),
@@ -2280,7 +2662,7 @@
     for (const r of rows) {
       const me = r.id === S.myId;
       const nm = displayName(r.id, r.doc);
-      const counts = CATS.map(c => c.emoji + " " + catTotal(r.doc, c)).join("   ") + (r.vomits ? "   🤮 " + r.vomits : "");
+      const counts = countsLine(c => catTotal(r.doc, c), r.vomits);
       ol.append(el("li", {}, el("button", { type: "button", class: "rank-row" + (r.rank === 1 ? " first-place" : ""),
         "aria-label": r.rank + ". hely: " + nm + (me ? " (te)" : "") + ", " + fmtPts(r.pts) + " pont. Részletek",
         onclick: () => openPerson(r.id) },
@@ -2288,7 +2670,7 @@
         avatar(r.id, nm),
         el("span", { class: "p-main", "aria-hidden": "true" },
           el("span", { class: "p-name", text: nm + (me ? " (te)" : "") }),
-          el("span", { class: "p-sub", text: counts })),
+          counts),
         el("span", { class: "rank-pts", "aria-hidden": "true" },
           el("span", { class: "cond", text: fmtPts(r.pts) }),
           el("span", { class: "rank-unit", text: "pont" })))));
@@ -2307,11 +2689,11 @@
     feed.sort((a, b) => b.t - a.t);
     if (feed.length) {
       sec.append(el("h3", { class: "feed-title cond", text: "Legutóbb" }));
-      const list = el("ol", { class: "feed" });
+      const list = el("ol", { class: "feed drinks-feed" });
       for (const f of feed.slice(0, 12)) {
         list.append(el("li", {},
           el("span", { class: "f-who", text: f.me ? "Te" : f.who }),
-          el("span", { text: CAT_BY_ID[f.c].emoji + " " + label(f.c, f.d) }),
+          el("span", { class: "f-what" }, catIcon(f.c), " " + label(f.c, f.d)),
           el("span", { class: "f-when", text: ago(f.t) })));
       }
       sec.append(list);
@@ -2401,7 +2783,7 @@
     const row = el("div", { class: "cat" + (cat.quiet ? " quiet" : ""), style: "--c: var(--" + cat.id + ")" });
     row.append(el("button", { type: "button", class: "cat-open", "aria-label": cat.name + ": " + total + " darab, " + fmtVol(total * cat.ml) + ". Részletek",
       onclick: () => openSheet({ type: "pcat", pid, cid: cat.id }) },
-      el("span", { class: "cat-title" }, el("span", { class: "emoji", "aria-hidden": "true", text: cat.emoji }), el("span", { text: cat.name })),
+      el("span", { class: "cat-title" }, catIcon(cat.id, "cat-big"), el("span", { text: cat.name })),
       el("span", { class: "cat-num cond", text: String(total) }),
       tally(total, false),
       hint ? el("span", { class: "cat-hint", text: hint }) : null,
@@ -2458,7 +2840,7 @@
       el("span", { class: "stat-sub", text: "alkoholos ital, " + fmtVol(alcMlOf(counts)) }),
       el("span", { class: "stat-cats", "aria-label": CATS.map(c => c.name + " " + Math.max(0, counts[c.id])).join(", ") },
         ...CATS.map(c => el("span", { class: "pc", style: "--c: var(--" + c.id + ")", "aria-hidden": "true" },
-          el("span", { class: "e", text: c.emoji }),
+          catIcon(c.id, "e"),
           el("span", { class: "n cond", text: String(Math.max(0, counts[c.id])) })))));
   }
   function statsSection(heading, yearCounts, totalCounts, note) {
@@ -2521,7 +2903,7 @@
     for (const r of rows) {
       const me = r.uid === S.myId;
       const nm = userName(r.uid);
-      const counts = CATS.map(c => c.emoji + " " + r.c[c.id]).join("   ");
+      const counts = countsLine(c => r.c[c.id], r.vomits);
       ol.append(el("li", {}, el("button", { type: "button", class: "rank-row" + (r.rank === 1 && r.pts > 0 ? " first-place" : ""),
         "aria-label": r.rank + ". hely: " + nm + (me ? " (te)" : "") + ", " + fmtPts(r.pts) + " pont. Profil",
         onclick: () => { S.kUser = r.uid; renderAll(); window.scrollTo(0, 0); } },
@@ -2529,13 +2911,13 @@
         avatar(r.uid, nm),
         el("span", { class: "p-main", "aria-hidden": "true" },
           el("span", { class: "p-name", text: nm + (me ? " (te)" : "") }),
-          el("span", { class: "p-sub", text: counts })),
+          counts),
         el("span", { class: "rank-pts", "aria-hidden": "true" },
           el("span", { class: "cond", text: fmtPts(r.pts) }),
           el("span", { class: "rank-unit", text: "pont" })))));
     }
     sec.append(ol);
-    sec.append(el("p", { class: "rules-note", text: "Pontozás: rövid +5, bor +3, sör +2, víz vagy üdítő +0,25, a hónap minden napjából (bulival vagy anélkül). A hányás itt nem számít bele." }));
+    sec.append(el("p", { class: "rules-note", text: "Pontozás: rövid +5, bor +3, sör +2, víz vagy üdítő +0,25 a hónap minden napjából (bulival vagy anélkül), és −20 minden hányásért, amit egy buliban a többiek megszavaztak (a buli első napjának hónapjában)." }));
     return sec;
   }
   function kocsmaIntro() {
@@ -2613,9 +2995,9 @@
     if (!mine) sec.append(friendBox(uid));
     const k = activeK();
     if (k && S.kMembers.has(uid)) {
-      const c = monthCounts(uid, curMonth());
-      sec.append(el("p", { class: "user-month" }, el("span", { class: "score-num cond", text: fmtPts(countsPts(c)) }),
-        " pont ebben a hónapban (" + monthLabel(curMonth()) + ")"));
+      const vm = monthVomits(uid, curMonth());
+      sec.append(el("p", { class: "user-month" }, el("span", { class: "score-num cond", text: fmtPts(monthPts(uid, curMonth())) }),
+        " pont ebben a hónapban (" + monthLabel(curMonth()) + ")" + (vm ? ", benne " + vm + " hányás" : "")));
     }
     sec.append(statsSection(mine ? "Az én statisztikám" : "Statisztikája", st.years[thisYear()] || emptyCounts(), st.total,
       mine ? "Minden napodból összeadva, bulival vagy anélkül." : "Minden napjából összeadva, bulival vagy anélkül."));
@@ -3094,6 +3476,7 @@
       el("div", { class: "prof-text" },
         el("h2", { class: "cond", text: S.username }),
         el("p", { class: "muted", text: "A napi naplód, a statisztikád és a beállításaid." }))));
+    wrap.append(badgeEntry());
     const st = statsOf(S.myId);
     wrap.append(statsSection("Az én statisztikám", st.years[thisYear()] || emptyCounts(), st.total, "Minden napodból összeadva, bulival vagy anélkül."));
     wrap.append(el("section", { class: "stats" },
@@ -3106,9 +3489,47 @@
     wrap.append(settingsSection());
     return wrap;
   }
-  function dayCountsText(d) {
+  /* ---------- Jelvények (fejlesztés alatt) ----------
+     Ide kerülnek majd a jelvények: { id, name, desc, icon (SVG szöveg, nem kötelező), earned: (ctx) => true/false }.
+     Amíg üres a lista, a jelvények helyén „Hamarosan” helyőrzők látszanak. */
+  const BADGES = [];
+  const BADGE_SLOTS = 9;
+  function badgeEarned(b) { try { return typeof b.earned === "function" && !!b.earned({ stats: statsOf(S.myId), days: S.days }); } catch (e) { return false; } }
+  function badgeEntry() {
+    const got = BADGES.filter(badgeEarned).length;
+    return el("button", { type: "button", class: "badge-entry", onclick: () => openSheet({ type: "badges" }) },
+      el("span", { class: "be-medals", "aria-hidden": "true" }, ...[0, 1, 2].map(() => iconSpan(ICON_MEDAL, "be-medal"))),
+      el("span", { class: "be-text" },
+        el("span", { class: "be-title", text: "Jelvényeim" }),
+        el("span", { class: "be-sub", text: BADGES.length ? got + " / " + BADGES.length + " megszerezve" : "Fejlesztés alatt" })),
+      iconSpan(ICON_NEXT, "dr-chev"));
+  }
+  function badgesBody() {
+    const wrap = el("div", { class: "badges" });
+    wrap.append(el("p", { class: "soon-tag", text: "Fejlesztés alatt" }),
+      el("p", { class: "muted", text: "Itt gyűlnek majd a jelvényeid, amiket különböző megtett dolgaidért kapsz. A jelvények és a leírásuk hamarosan érkeznek." }));
+    const grid = el("ul", { class: "badge-grid" });
+    const items = BADGES.length ? BADGES : Array.from({ length: BADGE_SLOTS }, (_, i) => ({ id: "soon" + i, name: "Hamarosan", desc: "", soon: true }));
+    items.forEach((b, i) => {
+      const on = !b.soon && badgeEarned(b);
+      const medal = el("span", { class: "b-medal", "aria-hidden": "true" });
+      if (b.soon) medal.textContent = "?";
+      else medal.innerHTML = b.icon || ICON_MEDAL;
+      grid.append(el("li", { class: "badge" + (on ? " earned" : " locked"), style: "--i:" + i,
+        "aria-label": b.soon ? "Hamarosan érkező jelvény" : b.name + (on ? ", megszerezve" : ", még nincs meg") + (b.desc ? ". " + b.desc : "") },
+        medal,
+        el("span", { class: "b-name", "aria-hidden": "true", text: b.name }),
+        b.desc ? el("span", { class: "b-desc", "aria-hidden": "true", text: b.desc }) : null));
+    });
+    wrap.append(grid);
+    return wrap;
+  }
+  // Egy nap darabszámai ikonokkal (csak a nem nulla kategóriák); ha nincs semmi, egy szöveg.
+  function dayCountsEl(d) {
     const c = dayCounts(d);
-    return CATS.filter(cat => c[cat.id] > 0).map(cat => cat.emoji + " " + c[cat.id]).join("   ");
+    const cats = CATS.filter(cat => c[cat.id] > 0);
+    if (!cats.length) return el("span", { class: "dr-counts", text: "Nincs felírt ital" });
+    return countsLine(cat => c[cat.id], 0, "dr-counts", cats);
   }
   function daysSection() {
     const sec = el("section", { class: "days" });
@@ -3129,7 +3550,7 @@
         el("span", { class: "dr-date" }, el("span", { class: "dr-day cond", text: dayLabel(k) }), el("span", { class: "dr-wd", text: dayRel(k) })),
         el("span", { class: "dr-main" },
           el("span", { class: "dr-party" + (d.party ? "" : " none"), text: d.party ? partyName(d.party) : "Nincs buli" }),
-          el("span", { class: "dr-counts", text: dayCountsText(d) || "Nincs felírt ital" })),
+          dayCountsEl(d)),
         iconSpan(ICON_NEXT, "dr-chev"))));
     }
     sec.append(ul);
@@ -3145,6 +3566,14 @@
       el("span", { class: "sr-main" }, el("span", { class: "sr-title", text }), sub ? el("span", { class: "sr-sub", text: sub }) : null),
       iconSpan(ICON_NEXT, "sr-chev"));
     sec.append(row("Fiók és e-mail", "Felhasználónév, e-mail-cím, fiókazonosító", () => openSheet({ type: "account" })));
+    const tseg = el("div", { class: "seg", role: "radiogroup", "aria-label": "Megjelenés" });
+    const cur = themeChoice();
+    const topt = (val, text) => el("button", { type: "button", class: "seg-btn", role: "radio", "aria-checked": cur === val ? "true" : "false",
+      onclick: () => { setTheme(val); renderAll(); } }, text);
+    tseg.append(topt("light", "Világos"), topt("dark", "Sötét"), topt("auto", "Automatikus"));
+    sec.append(el("div", { class: "set-block" },
+      el("span", { class: "sr-title", text: "Megjelenés" }), tseg,
+      el("span", { class: "sr-sub", text: "Automatikus: a telefonod beállítását követi. A választás ezen a telefonon marad meg." })));
     const seg = el("div", { class: "seg", role: "radiogroup", "aria-label": "Mértékegység" });
     const opt = (val, text) => el("button", { type: "button", class: "seg-btn", role: "radio", "aria-checked": S.units === val ? "true" : "false",
       onclick: () => { S.units = val; lsSet("strigula-units", val); renderAll(); } }, text);
@@ -3174,11 +3603,120 @@
   }
 
   /* ---------- Ivós játékok fül ---------- */
+  // Az app beépített ivós játékai (mindenki látja). A felhasználó saját játékai mellett jelennek meg; nem szerkeszthetők.
+  // id: állandó azonosító; aka: az eredeti (angol) név, erre is lehet keresni.
+  const BUILTIN_GAMES = [
+    { id: "varazslo", name: "A legbölcsebb varázsló", aka: "Wisest Wizard", players: "2+",
+      tools: "dobozos sör, ragasztószalag",
+      desc: "Ha kiürült a sörösdobozod, ragaszd ragasztószalaggal az új sörödnek az aljára: ez a varázsbotod.\n"
+        + "Akinek a leghosszabb a botja, az a legbölcsebb varázsló, és megparancsolhatja másoknak, hogy húzzák le a sörüket.\n"
+        + "A bot legfeljebb 8 dobozból állhat. Ha egy másik varázsló is eléri a 8-at, varázslópárbaj jön: akinek előbb törik el a botja, az veszít." },
+    { id: "vietnam", name: "Vietnámi háború", aka: "The Vietnam War", players: "4+ (két csapat)",
+      tools: "hosszú asztal, 20 műanyag pohár, 2 pingponglabda, sör",
+      desc: "Olyan, mint a beer pong, csak a két oldal nem egyforma.\n"
+        + "Az egyik oldal az USA: 10 pohár háromszögben, mint a beer pongban, nem túl telire töltve.\n"
+        + "A másik oldal Vietnám: 10 tele pohár, szétszórva a saját asztalfelén.\n"
+        + "Ha Vietnám talál, az USA egyik játékosa megissza azt a poharat (csak pár korty, mint a beer pongban), majd újratöltik: a pohár marad.\n"
+        + "Ha az USA talál, Vietnám egyik játékosa megissza a teljes poharat, és az lekerül az asztalról.\n"
+        + "A játék addig tart, amíg az USA fel nem adja, vagy el nem találja mind a 10 vietnámi poharat. Vietnám könnyen talál, de a poharak visszakerülnek; az USA ritkán talál, de akkor egy egész pohár fogy." },
+    { id: "bajusz", name: "Bajuszos játék", aka: "The Mustache Game", players: "2+",
+      tools: "tévé vagy kivetítő, ragasztószalag, papírból vágott vagy műbajusz",
+      desc: "Ragassz egy vagy több bajuszt a tévé képernyőjére, és nézzetek valamit (filmet, sorozatot, meccset).\n"
+        + "Valahányszor valakinek a képernyőn pont úgy áll a bajusz, mintha az övé lenne, mindenki iszik." },
+    { id: "boxkiallas", name: "Boxkiállás", aka: "", players: "2–4",
+      tools: "játékkonzol, számítógép vagy telefon autóversenyes játékkal (pl. F1, Forza Horizon), fejenként 1 sör",
+      desc: "Válasszatok egy autóversenyes játékot és egy pályát. Mindenki egy sörrel indul.\n"
+        + "A versenyt végig kell menned, és a sörödet is meg kell innod.\n"
+        + "Inni csak úgy lehet, ha leteszed a kontrollert: vezetni és inni egyszerre nem szabad.\n"
+        + "Ha elsőként érsz célba, de még van söröd, automatikusan veszítesz. Az nyer, aki elsőként ér célba üres pohárral.\n"
+        + "Csak videójátékban! Ittasan valódi autót soha ne vezess." },
+    { id: "paros-paratlan", name: "Páros-páratlan", aka: "Evens and Odds", players: "3+",
+      tools: "52 lapos francia kártya, italok",
+      desc: "Körben mindenki húz egy lapot. Ha páros lapot húzol, leveszel egy ruhadarabot; ha páratlant, iszol egy kortyot. (Az ász 1-nek, a bubi 11-nek, a dáma 12-nek, a király 13-nak számít.)\n"
+        + "Ha valakin már csak az utolsó ruhadarab van, és nem akarja levenni, helyette egy felest iszik.\n"
+        + "Utána folytathatjátok például egy „Felelsz vagy mersz” játékkal.\n"
+        + "Csak felnőttek játsszák, és csak akkor, ha mindenki önként benne van: bárki bármikor kiszállhat, és senkit nem szabad vetkőzésre vagy ivásra kényszeríteni." },
+    { id: "tusko", name: "Tuskó", aka: "Stump", players: "3–8",
+      tools: "kalapács, szögek (fejenként 1), fatuskó vagy vastag, fűrészelt fatörzsszelet",
+      desc: "Mindenki körbeüli a tuskót, és mindenkinek van egy saját szöge, épp csak beütve, így a tuskó tetején körben szögek állnak ki.\n"
+        + "Sorban mindenki feldobja a kalapácsot, elkapja, és az elkapott fogáson igazítás nélkül megpróbál valaki más szögére ütni, hogy beverje.\n"
+        + "Ha eltalálod valakinek a szögét, ő iszik. Ha teljesen beütöd, ő lehúzza az italát, és kiesik. Ha szikra pattan a szögről, mindenki iszik.\n"
+        + "Vigyázat: kalapáccsal játszani ittasan balesetveszélyes. Senki ne hajoljon a tuskó fölé, és tartsatok távolságot." },
+    { id: "torpedo", name: "Torpedó", aka: "Battleshots", players: "2 (vagy két csapat)",
+      tools: "rövidital, felespoharak (fejenként 17), fejenként 2 db 10×10-es négyzetrács, toll",
+      desc: "Mindkét játékos titokban berajzolja ugyanazt az „italflottát” a saját 10×10-es rácsára, vízszintesen vagy függőlegesen (átlósan, egymást átfedve vagy a rácsról lelógva nem lehet): egy 5-ös, egy 4-es, két 3-as és egy 2-es sort. A mezőknek megfelelő feleseket készítsd ki magad elé.\n"
+        + "Döntsétek el, ki kezd, aztán felváltva mondjatok egy-egy mezőt (pl. B7).\n"
+        + "Ha üres: „Mellé!”. Ha egy ital egy részét eltalálta: „Talált!”, és a védekező megissza az eltalált felest. Ha egy ital minden mezője megvan: „Elsüllyedt!”.\n"
+        + "A másik rácsodon jelöld a lövéseidet, hogy ne lőj kétszer ugyanoda. Az nyer, aki előbb találja el az ellenfél összes mezőjét.\n"
+        + "Tipp: 17 mező 17 felest jelent, ezért tölts kis adagokat." },
+    { id: "pohar-forditos", name: "Pohárfordítós", aka: "Flip Cup", players: "4+ (két csapat)",
+      tools: "hosszú asztal, 0,5 literes műanyag poharak (fejenként 1), ital",
+      desc: "A két csapat az asztal két oldalán áll sorban, mindenki előtt egy töltött pohár az asztal szélén.\n"
+        + "Jelre a két csapat első játékosa megissza az italát, az üres poharat az asztal szélére teszi úgy, hogy kicsit lelógjon, majd egy-két ujjal alulról megpöccinti, hogy fejjel lefelé forduljon az asztalon.\n"
+        + "Ha sikerült, jöhet a következő csapattárs. Az a csapat nyer, amelyik előbb végez." },
+    { id: "kiraly-pohara", name: "Király pohara", aka: "King's Cup", players: "3+",
+      tools: "52 lapos francia kártya, italok, 1 nagy pohár középre",
+      desc: "Teríts körbe a lapokat lefordítva a középső pohár körül. Sorban mindenki húz egy lapot úgy, hogy ne szakítsa meg a kört (aki megszakítja, iszik), és teljesíti a lap szabályát:\n"
+        + "Ász – Vízesés: mindenki iszik, és csak akkor hagyhatod abba, ha az előtted ülő már abbahagyta.\n"
+        + "2 – Te: kijelölsz valakit, aki iszik.\n"
+        + "3 – Én: te iszol.\n"
+        + "4 – Padló: aki utoljára érinti meg a padlót, iszik.\n"
+        + "5 – Fiúk: minden fiú iszik.\n"
+        + "6 – Lányok: minden lány iszik.\n"
+        + "7 – Mennyország: aki utoljára mutat felfelé, iszik.\n"
+        + "8 – Társ: választasz egy társat, aki mindig iszik, amikor te.\n"
+        + "9 – Rím: mondasz egy szót, és körben rímelni kell rá; aki nem tud, iszik.\n"
+        + "10 – Kategória: választasz egy témát, és körben mondani kell belőle valamit; aki nem tud, iszik.\n"
+        + "Bubi – Szabály: új szabályt hozol a játék végéig (aki megszegi, iszik).\n"
+        + "Dáma – Kérdésmester: aki válaszol a kérdéseidre, iszik.\n"
+        + "Király – Király pohara: tölts egy kicsit a középső pohárba. Aki a negyedik királyt húzza, megissza az egészet, és vége a játéknak." },
+    { id: "beer-pong", name: "Beer pong", aka: "Sörpong", players: "2–4 (két csapat)",
+      tools: "hosszú asztal, 20 db 0,5 literes műanyag pohár, 2 pingponglabda, ital",
+      desc: "Az asztal mindkét végén 10 részben töltött pohár áll háromszögben.\n"
+        + "A csapatok felváltva dobják vagy pattintják a labdákat az ellenfél poharaiba (körönként 2 dobás).\n"
+        + "Talált pohár: az ellenfél megissza, és leveszi a poharat.\n"
+        + "Ha egy körben mindkét csapattárs talál: visszakapjátok a labdákat, és újra dobhattok.\n"
+        + "Pattintott dobás: 2 pohárnak számít, de a pattanás után az ellenfél kiütheti a labdát.\n"
+        + "Átrendezés: játékonként kétszer kérhetitek, hogy a megmaradt poharakat szorosabb alakzatba rendezzék.\n"
+        + "Az nyer, aki előbb eltalálja az ellenfél összes poharát; a vesztes csapat megissza a saját maradék poharait." },
+    { id: "buszozas", name: "Buszozás", aka: "Ride the Bus", players: "3+",
+      tools: "52 lapos francia kártya, italok",
+      desc: "Az osztó mindenkinek 4 lapot oszt lefordítva, körönként egyet. Ha jól tippelsz, te osztod ki a kortyokat; ha rosszul, te iszol.\n"
+        + "1. kör: piros vagy fekete? (2 korty)\n"
+        + "2. kör: nagyobb vagy kisebb, mint az első lapod? (4 korty)\n"
+        + "3. kör: az első két lapod közé esik, vagy kívül? (6 korty)\n"
+        + "4. kör: melyik szín: treff, káró, kőr vagy pikk? (8 korty)\n"
+        + "A busz: rakjatok le lefordítva egy 5-4-3-2-1 lapos piramist, és alulról felfelé fordítsátok fel a sorokat. Ha van a kezedben ugyanolyan értékű lap, eldobhatod, és annyi kortyot oszthatsz ki, ahányadik sorban van (1–5).\n"
+        + "Akinél a végén a legtöbb lap marad, az „buszozik”: 5 új lapon végig kell tippelnie, hogy piros vagy fekete; minden rossz tippnél iszik, és elölről kezdi." },
+    { id: "ki-az-aki", name: "Ki az, aki…?", aka: "Most Likely To", players: "3+",
+      tools: "csak italok",
+      desc: "Üljetek körbe. Sorban mindenki feltesz egy „Ki az, aki a legvalószínűbben…?” kérdést (pl. „Ki az, akit a legvalószínűbben kidobnak egy kocsmából?”).\n"
+        + "Háromra mindenki arra mutat, akire szerinte a leginkább igaz.\n"
+        + "Annyi kortyot iszol, ahány ujj rád mutat.\n"
+        + "Házi szabály (nem kötelező): ha mindenki ugyanarra mutat, ő dupla kortyot iszik, vagy kiissza az italát." },
+    { id: "titanic", name: "Titanic", aka: "Titanic", players: "3+",
+      tools: "1 nagy (korsó) pohár, 1 felespohár, sör, rövidital",
+      desc: "Töltsd félig a nagy poharat sörrel, és tedd rá az üres felespoharat úgy, hogy egyenesen ússzon a tetején.\n"
+        + "Sorban mindenki tölt egy kis rövidet a felespohárba, annyit, amennyit mer.\n"
+        + "A felespohár egyre nehezebb lesz, és egyre mélyebbre süllyed.\n"
+        + "Akinek a töltése után a felespohár lesüllyed a pohár aljára, annak meg kell innia az egész keveréket. Utána újratöltés, és új kör." },
+    { id: "penzpattintos", name: "Pénzpattintós", aka: "Quarters", players: "2+",
+      tools: "sima asztal, 1 felespohár (vagy alacsony pohár), 1 érme (pl. 100 forintos), italok",
+      desc: "Tedd az üres poharat az asztal közepére. Sorban mindenki megpróbálja az érmét az asztalról a pohárba pattintani.\n"
+        + "Ha bement: kijelölsz valakit, aki iszik, és újra dobhatsz.\n"
+        + "Ha nem ment be: az érme a következő játékosé.\n"
+        + "Ha háromszor egymás után bedobod: új szabályt hozhatsz a játék végéig (aki megszegi, iszik)." },
+  ];
+  const BUILTIN_BY_ID = Object.fromEntries(BUILTIN_GAMES.map(g => [g.id, g]));
   function gamesView() {
     const sec = el("section", { class: "view games" });
     sec.append(el("h2", { class: "view-title cond", text: "Ivós játékok" }));
     sec.append(el("p", { class: "note", text: "Ivós játék adatbázis, fejlesztés alatt." }));
     sec.append(el("p", { class: "care", text: "Minden játékot a saját felelősségedre játszol. Senkit ne kényszeríts ivásra." }));
+    const tab = (val, text) => el("button", { type: "button", class: "seg-btn", role: "tab", "data-gtab": val,
+      "aria-selected": S.gameTab === val ? "true" : "false", onclick: () => { S.gameTab = val; updateGames(); } }, text);
+    sec.append(el("div", { class: "seg game-tabs", role: "tablist", "aria-label": "Játékok" },
+      tab("app", "Az app játékai"), tab("users", "Felhasználók játékai")));
     const input = el("input", { id: "gameSearch", class: "field search", type: "search", placeholder: "Keresés név alapján",
       autocomplete: "off", autocapitalize: "none", spellcheck: "false", enterkeyhint: "search", maxlength: 60, "aria-label": "Keresés név alapján" });
     input.value = S.gameQuery;
@@ -3188,34 +3726,104 @@
     sec.append(el("div", { id: "gameList", class: "game-list" }));
     return sec;
   }
+  // Két fül: az app játékai, és a felhasználók játékai (a sajátjaim, megosztva vagy sem, és mások megosztott játékai).
+  // A kereső a megnyitott fülön keres, a névre (az app játékainál az eredeti névre is).
   function updateGames() {
     const box = document.getElementById("gameList");
     if (!box) return;
-    const q = fold(S.gameQuery.trim());
-    const all = [...S.games.entries()];
-    const list = all.filter(([, g]) => !q || fold(g.name || "Névtelen játék").includes(q))
-      .sort((a, b) => (a[1].name ? 0 : 1) - (b[1].name ? 0 : 1)
-        || a[1].name.localeCompare(b[1].name, "hu", { sensitivity: "base" })
-        || b[1].createdAt - a[1].createdAt);
+    for (const b of document.querySelectorAll(".game-tabs .seg-btn")) b.setAttribute("aria-selected", b.dataset.gtab === S.gameTab ? "true" : "false");
+    const q = gameKey(S.gameQuery).trim();
+    const byName = (a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1) || a.name.localeCompare(b.name, "hu", { sensitivity: "base" }) || b.createdAt - a.createdAt;
     const out = [];
-    if (S.gamesError) out.push(banner(RULES_MSG));
-    if (!S.gamesLoaded) out.push(el("p", { class: "muted", text: "Betöltés…" }));
-    else if (!all.length) out.push(el("p", { class: "muted", text: "Még nincs saját játékod. A jobb alsó „+ játék” gombbal adhatsz hozzá egyet. A saját játékaidat csak te látod." }));
-    else if (!list.length) out.push(el("p", { class: "muted", text: "Nincs ilyen nevű játék." }));
-    else {
-      out.push(el("p", { class: "muted small", text: all.length + " saját játék" + (q ? ", ebből " + list.length + " illik a keresésre" : "") + ". Csak te látod őket." }));
-      for (const [id, g] of list) out.push(gameCard(id, g));
+    if (S.gameTab !== "users") {
+      const built = BUILTIN_GAMES.filter(g => !q || gameKey(g.name + " " + (g.aka || "")).includes(q))
+        .sort((a, b) => a.name.localeCompare(b.name, "hu", { sensitivity: "base" }));
+      if (!built.length) out.push(el("p", { class: "muted", text: "Nincs ilyen nevű játék." }));
+      else {
+        out.push(el("p", { class: "muted small", text: BUILTIN_GAMES.length + " játék" + (q ? ", ebből " + built.length + " illik a keresésre" : "") + ". Koppints egyre a teljes leírásért." }));
+        for (const g of built) out.push(gameCard(null, g));
+      }
+      box.replaceChildren(...out);
+      return;
     }
+    out.push(el("p", { class: "care users-care", text: "A felhasználók játékait nem ellenőrizzük. Mindenki a saját felelősségére játssza őket." }));
+    if (S.gamesError || S.sharedError) out.push(banner(RULES_MSG));
+    const all = [...S.games.entries()];
+    const mine = all.filter(([, g]) => !q || gameKey(g.name || "Névtelen játék").includes(q)).sort((a, b) => byName(a[1], b[1]));
+    const others = [...S.sharedGames.entries()].filter(([, g]) => g.uid !== S.myId)
+      .filter(([, g]) => !q || gameKey(g.name || "Névtelen játék").includes(q)).sort((a, b) => byName(a[1], b[1]));
+    const othersAll = [...S.sharedGames.values()].filter(g => g.uid !== S.myId).length;
+    if (!q || mine.length) out.push(el("h3", { class: "games-sub cond", text: "Saját játékaim" }));
+    if (!S.gamesLoaded) out.push(el("p", { class: "muted", text: "Betöltés…" }));
+    else if (!all.length) { if (!q) out.push(el("p", { class: "muted", text: "Még nincs saját játékod. A jobb alsó „+ játék” gombbal adhatsz hozzá egyet. Ha megosztod, a többiek is látják; ha nem, csak te." })); }
+    else if (mine.length) {
+      const sh = all.filter(([, g]) => g.shared).length;
+      out.push(el("p", { class: "muted small", text: all.length + " saját játék" + (q ? ", ebből " + mine.length + " illik a keresésre" : "") + (sh ? "; megosztva: " + sh : "; egyiket sem osztottad meg") + "." }));
+      for (const [id, g] of mine) out.push(gameCard(id, g));
+    }
+    if (!q || others.length) out.push(el("h3", { class: "games-sub cond", text: "Mások játékai" }));
+    if (!S.sharedLoaded) out.push(el("p", { class: "muted", text: "Betöltés…" }));
+    else if (!othersAll) { if (!q) out.push(el("p", { class: "muted", text: "Még senki más nem osztott meg játékot." })); }
+    else if (others.length) {
+      out.push(el("p", { class: "muted small", text: othersAll + " megosztott játék" + (q ? ", ebből " + others.length + " illik a keresésre" : "") + "." }));
+      for (const [id, g] of others) out.push(gameCard(id, g, true));
+    }
+    if (q && !mine.length && !others.length && S.gamesLoaded && S.sharedLoaded) out.push(el("p", { class: "muted", text: "Nincs ilyen nevű játék." }));
     box.replaceChildren(...out);
   }
-  function gameCard(id, g) {
+  // Kereséshez: ékezet és kis-nagybetű nélkül, az aposztróf nélkül (King's → kings).
+  function gameKey(s) { return fold(s).replace(/['’`]/g, "").replace(/\s+/g, " "); }
+  function playersText(p) { return p + (/[\d+]$/.test(p) ? " fő" : ""); }
+  // id: a felhasználói játék azonosítója; null: az app beépített játéka (g.id). other: más megosztott játéka.
+  function gameCard(id, g, other) {
     const meta = [];
-    if (g.players) meta.push("👥 " + g.players + (/\d$/.test(g.players) ? " fő" : ""));
+    if (other) meta.push("👤 " + userName(g.uid));
+    if (g.players) meta.push("👥 " + playersText(g.players));
     if (g.tools) meta.push("🧰 " + g.tools);
-    return el("button", { type: "button", class: "game-card", onclick: () => openSheet({ type: "game", id }) },
-      el("span", { class: "gc-name cond", text: g.name || "Névtelen játék" }),
+    const builtin = id === null;
+    const cls = builtin ? "builtin" : other ? "shared" : "own";
+    const open = builtin ? { type: "gameInfo", gid: g.id } : other ? { type: "sharedGame", gid: id } : { type: "game", id };
+    return el("button", { type: "button", class: "game-card " + cls, onclick: () => openSheet(open) },
+      el("span", { class: "gc-top" },
+        el("span", { class: "gc-name cond", text: g.name || "Névtelen játék" }),
+        !builtin && !other ? el("span", { class: "gc-tag" + (g.shared ? " on" : ""), text: g.shared ? "Megosztva" : "Csak te látod" }) : null),
       meta.length ? el("span", { class: "gc-meta", text: meta.join("    ") }) : null,
       g.desc ? el("span", { class: "gc-desc", text: g.desc }) : null);
+  }
+  // Más felhasználó megosztott játéka (csak olvasható; a tulajdonos törölheti).
+  function sharedGameBody(gid) {
+    const g = S.sharedGames.get(gid);
+    const wrap = el("div", { class: "stack game-info" });
+    if (!g) { wrap.append(el("p", { class: "muted", text: "Ezt a játékot közben törölték, vagy már nincs megosztva." })); return wrap; }
+    wrap.append(el("p", { class: "muted small", text: "Készítette: " + userName(g.uid) }));
+    const dl = el("dl", { class: "gi-meta" });
+    if (g.players) dl.append(el("dt", { text: "Személyek száma" }), el("dd", { text: playersText(g.players) }));
+    if (g.tools) dl.append(el("dt", { text: "Szükséges eszközök" }), el("dd", { text: g.tools }));
+    if (dl.childNodes.length) wrap.append(dl);
+    if (g.desc) wrap.append(el("h3", { class: "settings-sub cond first", text: "Leírás" }), el("p", { class: "gi-desc", text: g.desc }));
+    wrap.append(el("p", { class: "care", text: "A felhasználók játékait nem ellenőrizzük. Mindenki a saját felelősségére játssza őket; senkit ne kényszeríts ivásra." }));
+    if (S.isOwner && ownerUnlocked()) {
+      const label = (g.name || "Névtelen játék") + " (" + userName(g.uid) + ")";
+      wrap.append(el("button", { type: "button", class: "btn danger wide",
+        onclick: () => confirmSheet("Törlöd ezt a megosztott játékot: „" + label + "”? A készítőjénél is törlődik.", "Törlöm",
+          () => ownerAction(() => S.backend.adminDeleteGame(gid, label), "A játék törölve.")) }, "Törlés (tulajdonos)"));
+    }
+    return wrap;
+  }
+  // Az app egy játékának teljes leírása (csak olvasható).
+  function gameInfoBody(gid) {
+    const g = BUILTIN_BY_ID[gid];
+    const wrap = el("div", { class: "stack game-info" });
+    if (!g) { wrap.append(el("p", { class: "muted", text: "Nincs ilyen játék." })); return wrap; }
+    if (g.aka && fold(g.aka) !== fold(g.name)) wrap.append(el("p", { class: "muted small", text: "Más néven: " + g.aka }));
+    wrap.append(
+      el("dl", { class: "gi-meta" },
+        el("dt", { text: "Személyek száma" }), el("dd", { text: playersText(g.players) }),
+        el("dt", { text: "Szükséges eszközök" }), el("dd", { text: g.tools })),
+      el("h3", { class: "settings-sub cond first", text: "Leírás" }),
+      el("p", { class: "gi-desc", text: g.desc }),
+      el("p", { class: "care", text: "Minden játékot a saját felelősségedre játszol. Senkit ne kényszeríts ivásra." }));
+    return wrap;
   }
 
   /* ---------- Naptár és Térkép: hamarosan ---------- */
@@ -3412,6 +4020,19 @@
         title.textContent = sheet.id ? "Játék" : "Új játék";
         body.append(gameBody(sheet));
         break;
+      case "badges":
+        title.textContent = "Jelvényeim";
+        panel.classList.add("sheet-badges");
+        body.append(badgesBody());
+        break;
+      case "gameInfo":
+        title.textContent = BUILTIN_BY_ID[sheet.gid] ? BUILTIN_BY_ID[sheet.gid].name : "Játék";
+        body.append(gameInfoBody(sheet.gid));
+        break;
+      case "sharedGame":
+        title.textContent = (S.sharedGames.get(sheet.gid) || {}).name || "Játék";
+        body.append(sharedGameBody(sheet.gid));
+        break;
       case "account":
         title.textContent = "Fiók és e-mail";
         body.append(accountBody());
@@ -3464,6 +4085,10 @@
         title.textContent = "Kocsmák";
         body.append(ownerKocsmakBody());
         break;
+      case "ownerReset":
+        title.textContent = "Nullázás";
+        body.append(ownerResetBody());
+        break;
       case "ownerKocsma":
         title.textContent = "Kocsma";
         body.append(ownerKocsmaBody(sheet));
@@ -3490,7 +4115,8 @@
             el("button", { type: "button", class: sheet.safe ? "btn" : "btn danger", onclick: () => { const a = sheet.action; closeSheet(); a(); } }, sheet.label)));
         break;
     }
-    root.append(el("div", { class: "backdrop", onclick: closeSheet }), panel);
+    // A jelvényeknél a háttér elhomályosodik.
+    root.append(el("div", { class: "backdrop" + (sheet.type === "badges" ? " blur" : ""), onclick: closeSheet }), panel);
     updateLock();
     renderSheet();
     try { (focus || close).focus({ preventScroll: true }); } catch (e) {}
@@ -3524,7 +4150,7 @@
     for (const cat of CATS) {
       const sec = el("section", { class: "pick", style: "--c: var(--" + cat.id + ")" });
       sec.append(el("h3", { class: "pick-title" },
-        el("span", { class: "pick-name" }, el("span", { "aria-hidden": "true", text: cat.emoji + " " }), cat.name),
+        el("span", { class: "pick-name" }, catIcon(cat.id, "pick-ico"), cat.name),
         el("span", { class: "pick-total cond", text: String(dayCount(day, cat.id)) })));
       const chips = el("div", { class: "chips" });
       const quick = quickOf(cat.id);
@@ -3560,7 +4186,7 @@
       out.push(el("div", { class: "cat" + (cat.quiet ? " quiet" : ""), style: "--c: var(--" + cat.id + ")" },
         el("button", { type: "button", class: "cat-open", "aria-label": cat.name + ": " + n + " darab. Javítás",
           onclick: () => openSheet({ type: "daycat", day: key, cid: cat.id, back: { type: "day", day: key } }) },
-          el("span", { class: "cat-title" }, el("span", { class: "emoji", "aria-hidden": "true", text: cat.emoji }), el("span", { text: cat.name })),
+          el("span", { class: "cat-title" }, catIcon(cat.id, "cat-big"), el("span", { text: cat.name })),
           el("span", { class: "cat-num cond", text: String(n) }),
           tally(n, S.fresh === key + "|" + cat.id),
           el("span", { class: "cat-hint", text: hint || (canEdit() ? "Koppints a javításhoz" : "") }),
@@ -3595,7 +4221,7 @@
     const editable = canEdit();
     const total = dayCount(day, cat.id);
     $("#sheetTitle").replaceChildren(
-      document.createTextNode(cat.emoji + " " + cat.name + " "),
+      catIcon(cat.id, "title-ico"), document.createTextNode(cat.name + " "),
       el("span", { class: "sheet-total", text: String(total) }),
       el("span", { class: "sheet-vol", text: " " + fmtVol(total * cat.ml) }));
     const body = $("#sheetBody");
@@ -3663,7 +4289,7 @@
     const ownerEdit = !mine && S.isOwner && ownerUnlocked();
     const total = catTotal(doc, cat);
     $("#sheetTitle").replaceChildren(
-      document.createTextNode(cat.emoji + " " + cat.name + " "),
+      catIcon(cat.id, "title-ico"), document.createTextNode(cat.name + " "),
       el("span", { class: "sheet-total", text: String(total) }),
       el("span", { class: "sheet-vol", text: " " + fmtVol(total * cat.ml) }));
     const body = $("#sheetBody");
@@ -3706,7 +4332,7 @@
       const d = getDay(k);
       ul.append(el("li", {}, el("button", { type: "button", class: "day-row", onclick: () => openSheet({ type: "day", day: k, back: s }) },
         el("span", { class: "dr-date" }, el("span", { class: "dr-day cond", text: dayLabel(k) }), el("span", { class: "dr-wd", text: dayRel(k) })),
-        el("span", { class: "dr-main" }, el("span", { class: "dr-counts", text: dayCountsText(d) || "Nincs felírt ital" })),
+        el("span", { class: "dr-main" }, dayCountsEl(d)),
         iconSpan(ICON_NEXT, "dr-chev"))));
     }
     wrap.append(ul);
@@ -3861,12 +4487,17 @@
     const players = field("gPlayers", "Személyek száma", { maxlength: GAME_MAX.players, autocomplete: "off", placeholder: "pl. 3–8" }, g && g.players);
     const tools = field("gTools", "Szükséges eszközök", { maxlength: GAME_MAX.tools, autocomplete: "off", placeholder: "pl. kártyapakli, poharak" }, g && g.tools);
     const desc = field("gDesc", "Rövid leírás", { maxlength: GAME_MAX.desc, rows: 5, placeholder: "Röviden a szabályok…" }, g && g.desc, true);
+    const share = el("input", { type: "checkbox", id: "gShare" });
+    share.checked = !!(g && g.shared);
+    wrap.append(el("label", { class: "check block", for: "gShare" }, share,
+      el("span", { text: "Megosztom a többi felhasználóval (a „Felhasználók játékai” fülön mindenki látja, a felhasználónevemmel együtt)." })));
     const msg = el("p", { class: "msg", role: "status" });
     const btn = el("button", { type: "button", class: "btn wide" }, g ? "Mentés" : "Hozzáadás");
     btn.addEventListener("click", () => {
       const data = {
         name: cleanLine(name.value, GAME_MAX.name), players: cleanLine(players.value, GAME_MAX.players),
         tools: cleanLine(tools.value, GAME_MAX.tools), desc: cleanText(desc.value, GAME_MAX.desc),
+        shared: share.checked,
       };
       if (!data.name && !data.desc) { msg.textContent = "Adj meg legalább egy nevet vagy egy rövid leírást."; msg.classList.add("err"); return; }
       if (!canEdit() || typeof S.backend.saveGame !== "function") { msg.textContent = "Most nem lehet menteni."; msg.classList.add("err"); return; }
@@ -3877,7 +4508,8 @@
       try { r = S.backend.saveGame(s.id || null, data); } catch (e) { onGameError(e); return; }
       Promise.resolve(r && r.done).catch(onGameError);
       closeSheet();
-      toast(g ? "Elmentve." : "Hozzáadva: " + (data.name || "Névtelen játék"));
+      if (S.gameTab !== "users") { S.gameTab = "users"; updateGames(); }
+      toast((g ? "Elmentve." : "Hozzáadva: " + (data.name || "Névtelen játék")) + (data.shared ? " Mindenki látja." : ""));
     });
     wrap.append(btn, msg);
     if (g) {
@@ -3887,7 +4519,7 @@
           toast("A játék törölve.");
         }) }, "Törlés"));
     }
-    wrap.append(el("p", { class: "muted small", text: "A saját játékaidat csak te látod." }));
+    wrap.append(el("p", { class: "muted small", text: "Ha nem osztod meg, a játékot csak te látod. A megosztott játékot a tulajdonos törölheti." }));
     return wrap;
   }
   function onGameError(e) {
@@ -3925,7 +4557,7 @@
       el("label", { class: "check block", for: "cTerms" }, terms,
         el("span", { text: "Elolvastam és elfogadom a Felhasználási feltételeket, és tudomásul veszem, hogy az appot a saját felelősségemre használom." })),
       el("label", { class: "check block", for: "cAgree" }, agree,
-        el("span", { text: "Elolvastam az adatkezelési tájékoztatót, és kifejezetten hozzájárulok, hogy az app tárolja a napi naplómat (az általam felírt italokat), és a többi felhasználónak megmutassa a statisztikámat, a bulikon felírt italaimat, a pontjaimat és a rólam szóló szavazatokat, a kocsmáim tagjainak pedig a havi pontjaimat és a chat-üzeneteimet." })));
+        el("span", { text: "Elolvastam az adatkezelési tájékoztatót, és kifejezetten hozzájárulok, hogy az app tárolja a napi naplómat (az általam felírt italokat), és a többi felhasználónak megmutassa a statisztikámat, a bulikon felírt italaimat, a pontjaimat, a rólam szóló szavazatokat és a megosztott ivós játékaimat, a kocsmáim tagjainak pedig a havi pontjaimat (benne a bulikon megszavazott hányásaim számát) és a chat-üzeneteimet." })));
     return { box, adult, terms, agree };
   }
   function authView() {
@@ -4018,8 +4650,8 @@
   function consentView() {
     const sec = el("section", { class: "onboard" });
     sec.append(el("h2", { class: "hero cond", text: "Feltételek" }));
-    sec.append(el("p", { class: "lead", text: "Frissült az app: megjöttek a barátok és a kocsmák (közös chattel, havi ranglistával és kocsmás bulival). Mielőtt folytatod, kérjük, olvasd el a frissített adatkezelési tájékoztatót és a Felhasználási feltételeket, fogadd el a feltételeket, és járulj hozzá az adataid kezeléséhez." }));
-    sec.append(el("p", { class: "note", text: "Röviden: az app a felhasználónevedet és a napi naplódat (a felírt italaidat) tárolja. A napi naplód részleteit és a barátlistádat csak te látod; a statisztikádat, a bulikon felírt italaidat, a pontjaidat és a rólad szóló szavazatokat a többi felhasználó is látja, a kocsmád chatjét és tagjait pedig a kocsma tagjai. Nem adjuk el és nem adjuk át senkinek. A fiókodat bármikor törölheted a Profil fülön." }));
+    sec.append(el("p", { class: "lead", text: "Frissült az app: az ivós játékaidat már megoszthatod a többiekkel, és bővültek a Felhasználási feltételek (az ivós játékokról). Mielőtt folytatod, kérjük, olvasd el a frissített adatkezelési tájékoztatót és a Felhasználási feltételeket, fogadd el a feltételeket, és járulj hozzá az adataid kezeléséhez." }));
+    sec.append(el("p", { class: "note", text: "Röviden: az app a felhasználónevedet és a napi naplódat (a felírt italaidat) tárolja. A napi naplód részleteit és a barátlistádat csak te látod; a statisztikádat, a bulikon felírt italaidat, a pontjaidat, a rólad szóló szavazatokat és a megosztott ivós játékaidat a többi felhasználó is látja, a kocsmád chatjét, tagjait és a havi ranglistát (benne a megszavazott hányásaid számát) pedig a kocsma tagjai. Nem adjuk el és nem adjuk át senkinek. A fiókodat bármikor törölheted a Profil fülön." }));
     const cons = consentBoxes();
     const msg = el("p", { class: "msg", role: "status" });
     const btn = el("button", { type: "button", class: "btn big wide" }, "Elfogadom és folytatom");
@@ -4045,25 +4677,25 @@
         "A napi naplódat: amit felírsz, napokra bontva (az ital fajtáját és darabszámát, a napközben felírt italoknál az időpontot is), és azt, hogy melyik napod melyik bulihoz tartozik.",
         "A bulikat, amelyekben részt veszel: a buli nevét és kódját, a buliba rendelt napjaid összesítését és a hányás-szavazatokat.",
         "Az ezekből számolt statisztikát (éves, összesített és napi) és a pontjaidat.",
-        "A saját ivós játékaidat (név, létszám, eszközök, leírás), ha felveszel ilyet.",
+        "A saját ivós játékaidat (név, létszám, eszközök, leírás), ha felveszel ilyet, és hogy megosztod-e őket a többiekkel.",
         "A barátaidat és a barátkéréseket (ki kit jelölt barátnak, és mikor), valamint a barátaidtól kapott kocsma-meghívókat.",
-        "A kocsmáidat: a kocsma nevét, profilképét, meghívókódját és alapítóját, a tagokat és a belépésük idejét, a kocsmás buli kódját és napját, valamint a kocsma chatjébe írt üzeneteidet (a szöveget és az időpontot).",
+        "A kocsmáidat: a kocsma nevét, profilképét, meghívókódját és alapítóját, a tagokat és a belépésük idejét, a kocsmás buli kódját és napját, a kocsma chatjébe írt üzeneteidet (a szöveget és az időpontot), valamint a tagságodnál a havi ranglistához, hogy melyik hónapban hány hányásodat szavazták meg a bulijaid résztvevői.",
         "A saját italneveidet, és hogy kategóriánként melyik fajtát választottad utoljára (ezt írja fel a +1 gomb).",
         "Azoknak a buliknak a kódját, amelyekben részt vettél. Ezt csak te látod, és azért tároljuk, hogy a fiókod törlésekor minden buliból törölhessük az adataidat.",
         "Azoknak a kocsmáknak az azonosítóját, amelyeknek tagja vagy vagy voltál. Ezt csak te látod, és azért tároljuk, hogy a fiókod törlésekor minden kocsmából törölhessük az üzeneteidet és a tagságodat.",
         "A hozzájárulásod és a Felhasználási feltételek elfogadásának időpontját.",
-        "A telefonodon, a böngésző tárhelyén a mértékegység beállítását, a korábbi bulijaid listáját, a legutóbb választott kocsmát, és hogy a chatben meddig olvastál."),
+        "A telefonodon, a böngésző tárhelyén a mértékegység és a megjelenés (világos, sötét vagy automatikus) beállítását, a korábbi bulijaid listáját, a legutóbb választott kocsmát, hogy a chatben meddig olvastál, a bulijaidból számolt hányásszámot, és hogy azt melyik kocsmádba írtuk már be, a tulajdonos legutóbbi nullázásának idejét, valamint hogy mely korábbi kocsmáidat ellenőrizte már az app."),
       h("Mire használjuk?"),
       para("Kizárólag az app működéséhez: hogy a napi napló, a számlálók, a statisztika, a grafikon, a verseny, a barátok, a kocsmák, a chat és a havi ranglista működjön, és a buli résztvevői lássák egymás italait. Az e-mail-címet csak a jelszó visszaállításához és a cím megerősítéséhez használjuk. Nincs reklám, az adataidat nem adjuk el és nem adjuk át senkinek, és más célra nem használjuk."),
       h("Mi a jogalap?"),
       para("A hozzájárulásod (GDPR 6. cikk (1) bekezdés a) pont). Mivel az italfogyasztásra vonatkozó adatok egészségügyi jellegűnek is tekinthetők, ezekhez kifejezett hozzájárulást kérünk (GDPR 9. cikk (2) bekezdés a) pont). A hozzájárulásodat bármikor visszavonhatod a fiókod törlésével; ez nem érinti a korábbi adatkezelés jogszerűségét."),
       h("Ki látja az adataidat?"),
-      para("A napi naplód részleteit (hogy melyik napon pontosan mit ittál, és melyik napod melyik bulihoz tartozik), a saját italneveidet, az ivós játékaidat és a barátlistádat csak te látod. Egy barátkérést a küldője és a címzettje lát; ha egy barátodat meghívod egy kocsmába, ő látja a meghívót (a kocsma nevét, képét és meghívókódját)."),
-      para("A többi bejelentkezett felhasználó látja a felhasználónevedet, a statisztikádat (kategóriánként: éves, összesített és napi bontásban) és a grafikonodat. Egy bulin a résztvevők látják a buliba rendelt napjaid összesítését fajtánként, a legutóbbi italaidat az időpontjukkal, a pontjaidat és a rólad szóló szavazatokat. Egy buli adatait az láthatja, akinek van fiókja és ismeri a buli kódját. Az e-mail-címedet és a jelszavadat senki más nem látja."),
-      para("Egy kocsma nevét, profilképét és tagjainak listáját az láthatja, akinek van fiókja és megvan a kocsma meghívókódja vagy meghívó linkje. A kocsma chatjét, a tagok belépési idejét, az alapítót, a meghívókódot és a kocsmás bulit csak a kocsma tagjai látják. A havi ranglistán a kocsma tagjai a havi pontjaidat és italaid számát is látják; ezek a statisztikádból számolódnak, amelyet a többi felhasználó egyébként is lát."),
+      para("A napi naplód részleteit (hogy melyik napon pontosan mit ittál, és melyik napod melyik bulihoz tartozik), a saját italneveidet, a meg nem osztott ivós játékaidat és a barátlistádat csak te látod. Egy barátkérést a küldője és a címzettje lát; ha egy barátodat meghívod egy kocsmába, ő látja a meghívót (a kocsma nevét, képét és meghívókódját)."),
+      para("A többi bejelentkezett felhasználó látja a felhasználónevedet, a statisztikádat (kategóriánként: éves, összesített és napi bontásban) és a grafikonodat. Egy bulin a résztvevők látják a buliba rendelt napjaid összesítését fajtánként, a legutóbbi italaidat az időpontjukkal, a pontjaidat és a rólad szóló szavazatokat. Egy buli adatait az láthatja, akinek van fiókja és ismeri a buli kódját. Az ivós játékaid közül azokat, amelyeket megosztasz, minden bejelentkezett felhasználó látja a felhasználóneveddel együtt. Az e-mail-címedet és a jelszavadat senki más nem látja."),
+      para("Egy kocsma nevét, profilképét és tagjainak listáját az láthatja, akinek van fiókja és megvan a kocsma meghívókódja vagy meghívó linkje. A kocsma chatjét, a tagok belépési idejét, az alapítót, a meghívókódot és a kocsmás bulit csak a kocsma tagjai látják. A havi ranglistán a kocsma tagjai a havi pontjaidat, italaid számát és azt is látják, hogy abban a hónapban hány hányásodat szavazták meg a bulijaid résztvevői. Az italok a statisztikádból számolódnak, amelyet a többi felhasználó egyébként is lát; a hányások számát a telefonod számolja ki a bulijaid szavazataiból (ugyanazzal a szabállyal, mint a buli versenyében), és beírja a kocsmáidba."),
       para("Adatfeldolgozó a Google (Firebase szolgáltatás). Az adatbázis európai szervereken van; a bejelentkezési adatokat a Google az EU–USA adatvédelmi keretrendszer és szerződéses garanciák alapján az Egyesült Államokban is kezelheti. Az oldal betöltésekor a GitHub (a tárhely) és a Google (betűtípusok, Firebase) a működéshez szükséges technikai adatokat, például az IP-címedet is megkapja."),
       h("A tulajdonos jogosultságai"),
-      para("Az app tulajdonosa (az adatkezelő) a visszaélések kezelése és a hibák javítása érdekében átnevezhet felhasználókat, javíthatja vagy nullázhatja a buli-számlálókat (ilyenkor a buliba rendelt napjaidat is), törölhet szavazatokat, bulikat és felhasználói adatokat, és letilthat fiókokat. Ehhez a saját fiókjával, a jelszava újbóli megadása után fér hozzá, és minden ilyen műveletet naplózunk. Ugyanígy kocsmákat törölhet, tagot távolíthat el egy kocsmából, és chat-üzeneteket törölhet. Ehhez a tulajdonos a bulik és a kocsmáid listáját, a barátlistádat, a hozzájárulásod időpontját, a napi naplódat, valamint a kocsmák adatait és üzeneteit is láthatja. A tulajdonos a Firebase kezelőfelületén keresztül is hozzáfér az adatokhoz."),
+      para("Az app tulajdonosa (az adatkezelő) a visszaélések kezelése és a hibák javítása érdekében átnevezhet felhasználókat, javíthatja vagy nullázhatja a buli-számlálókat (ilyenkor a buliba rendelt napjaidat is), mindenkinél egyszerre nullázhatja a fogyasztást (a napi naplóban felírt italokat, a statisztikát, a buli-összesítéseket és a hányás-szavazatokat), törölhet szavazatokat, bulikat és felhasználói adatokat, és letilthat fiókokat. Ehhez a saját fiókjával, a jelszava újbóli megadása után fér hozzá, és minden ilyen műveletet naplózunk. Ugyanígy kocsmákat törölhet, tagot távolíthat el egy kocsmából, chat-üzeneteket és megosztott ivós játékokat törölhet. Ehhez a tulajdonos a bulik és a kocsmáid listáját, a barátlistádat, a hozzájárulásod időpontját, a napi naplódat, valamint a kocsmák adatait és üzeneteit is láthatja. A tulajdonos a Firebase kezelőfelületén keresztül is hozzáfér az adatokhoz."),
       h("Meddig tároljuk?"),
       para("Amíg a fiókod létezik. A chat-üzeneteket addig tároljuk, amíg a szerzőjük, a kocsma alapítója vagy a tulajdonos nem törli őket, vagy amíg a kocsma meg nem szűnik; ha kilépsz egy kocsmából, az üzeneteid ott maradnak. Ha törlöd a fiókodat, a profilod, a felhasználóneved, a statisztikád, a napi naplód, az ivós játékaid, a barátságaid és a barátkéréseid, minden chat-üzeneted, valamint a buli-összesítéseid és a szavazataid minden olyan buliból azonnal törlődnek, amelyről az app tud (amelyet bármelyik eszközödön megnyitottál ezzel a fiókkal, vagy amelyhez napot rendeltél). A kocsmáidból kilépsz: ahol alapító vagy, a kocsmát a legrégebbi tag kapja meg; ahol te vagy az utolsó tag, a kocsma minden adatával törlődik. Ha egy régebbi buliban mégis maradna adatod, például egy azóta nem használt telefonról, az adatkezelő kérésre törli. A mások által rólad leadott szavazatokban csak egy azonosító marad, ami már senkihez sem köthető. A bulik neve a bulihoz tartozik, ezért az megmarad."),
       h("Milyen jogaid vannak?"),
@@ -4093,7 +4725,7 @@
       h("4. Az app nem orvosi és nem mérőeszköz"),
       para("Az appban megjelenő mennyiségek (például egy rövid 4 cl, egy sör 5 dl) becslések, a felhasználók által beírt adatokon alapulnak, és eltérhetnek a valóságtól. Az app nem méri és nem becsüli a véralkoholszintet, nem nyújt orvosi tanácsot, és nem alkalmas annak megítélésére, hogy valaki vezethet-e, dolgozhat-e, vagy hogy egészségügyi szempontból mennyi alkohol biztonságos számára."),
       h("5. Ivós játékok és a felhasználók által beírt tartalom"),
-      para("Az ivós játékokat a felhasználók maguk írják; az üzemeltető ezeket nem ellenőrzi, nem ajánlja és nem vállal értük felelősséget. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok, kocsmák és chat-üzenetek). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja."),
+      para("Az appban kétféle ivós játék van: az app saját játékai, és azok, amelyeket a felhasználók készítenek (és megoszthatnak egymással). A felhasználók által készített ivós játékokat az üzemeltető nem ellenőrzi és nem ajánlja. Az üzemeltető egyik ivós játékért sem vállal felelősséget, sem az app saját játékaiért, sem a felhasználók által készítettekért, és az ezekből eredő károkért vagy személyi sérülésekért sem, a 7. pontban leírt keretek között. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok, kocsmák és chat-üzenetek). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja."),
       h("6. Az app „ahogy van” működik"),
       para("Az app egy baráti társaság szabadidős, ingyenes fejlesztése. Az üzemeltető nem vállal kötelezettséget és nem ad garanciát arra, hogy az app hibátlanul vagy megszakítás nélkül működik, hogy az adatok pontosak, teljesek vagy mindig elérhetők, illetve hogy nem vesznek el. Az üzemeltető az appot bármikor módosíthatja, szüneteltetheti vagy megszüntetheti. Az app külső szolgáltatásokat használ (Google Firebase, GitHub); ezek működéséért az üzemeltető nem felel."),
       h("7. A felelősség kizárása"),
@@ -4186,8 +4818,8 @@
   function ownerLogText(e) {
     const who = e.target ? displayName(e.target, S.docs.get(e.target)) : "";
     const names = { rename: "Átnevezés", ban: "Letiltás", unban: "Letiltás feloldása", wipe: "Adatok törlése", edit: "Számláló javítása",
-      reset: "Számlálók nullázása", clearvotes: "Szavazatok törlése", deleteparty: "Buli törlése",
-      kdelete: "Kocsma törlése", kmsg: "Üzenet törlése", kkick: "Kocsmatag eltávolítása" };
+      reset: "Számlálók nullázása", resetall: "Minden fogyasztás nullázása", clearvotes: "Szavazatok törlése", deleteparty: "Buli törlése",
+      kdelete: "Kocsma törlése", kmsg: "Üzenet törlése", kkick: "Kocsmatag eltávolítása", gdelete: "Megosztott játék törlése" };
     const parts = [names[e.action] || e.action];
     if (e.detail) parts.push(e.detail); else if (who) parts.push(who);
     if (e.party) parts.push("(" + e.party + ")");
@@ -4242,6 +4874,10 @@
     wrap.append(el("h3", { class: "settings-sub cond", text: "Kocsmák" }),
       el("button", { type: "button", class: "btn secondary wide", onclick: () => openSheet({ type: "ownerKocsmak", back: { type: "owner" } }) }, "Kocsmák kezelése"));
 
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Újrakezdés" }),
+      el("p", { class: "muted", text: "Mindenkinél nulláról indul minden fogyasztás. A fiókok, a barátok, a kocsmák, a chat, a bulik és az ivós játékok megmaradnak." }),
+      el("button", { type: "button", class: "btn danger wide", onclick: () => openSheet({ type: "ownerReset", back: { type: "owner" } }) }, "Minden fogyasztás nullázása"));
+
     wrap.append(el("h3", { class: "settings-sub cond", text: "Napló" }));
     const logBox = el("div", { class: "owner-log" }, el("p", { class: "muted", text: "Betöltés…" }));
     wrap.append(logBox);
@@ -4259,6 +4895,40 @@
       }).catch(() => { logBox.replaceChildren(el("p", { class: "muted", text: "A napló nem tölthető be." })); });
     }
     return wrap;
+  }
+  const RESET_WORD = "NULLÁZÁS";
+  function ownerResetBody() {
+    const wrap = el("div", { class: "stack" });
+    if (!ownerUnlocked()) {
+      wrap.append(el("p", { text: "Lejárt a feloldás." }),
+        el("button", { type: "button", class: "btn wide", onclick: () => openSheet({ type: "owner" }) }, "Feloldás"));
+      return wrap;
+    }
+    const input = el("input", { id: "resetWord", class: "field", type: "text", maxlength: 20, autocomplete: "off",
+      autocapitalize: "characters", spellcheck: "false", enterkeyhint: "done" });
+    const msg = el("p", { class: "msg", role: "status" });
+    const btn = el("button", { type: "button", class: "btn danger wide" }, "Nullázom");
+    const go = () => doOwnerReset(input.value, msg, btn);
+    btn.addEventListener("click", go);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    wrap.append(
+      el("p", { class: "confirm-text", text: "Mindenkinél törlődik minden felírt ital: a napi napló italai, a statisztika (éves, összesített, napi), minden buli-összesítés és minden hányás-szavazat, így a havi ranglisták is nulláról indulnak. Megmaradnak: a fiókok, a barátok, a kocsmák és a chat, a bulik (a nevük, és hogy kinek melyik napja tartozik hozzájuk), a saját italnevek és az ivós játékok. Ezt nem lehet visszavonni." }),
+      el("label", { class: "lbl", for: "resetWord", text: "A megerősítéshez írd be: " + RESET_WORD }), input, btn, msg);
+    return wrap;
+  }
+  async function doOwnerReset(word, msg, btn) {
+    const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
+    if (String(word || "").trim().toLocaleUpperCase("hu-HU") !== RESET_WORD) { say("A megerősítéshez írd be: " + RESET_WORD, true); return; }
+    if (typeof S.backend.adminResetConsumption !== "function") return;
+    btn.disabled = true;
+    say("Nullázás…");
+    let sum = null;
+    const ok = await ownerAction(async () => { sum = await S.backend.adminResetConsumption((t) => say("Nullázás: " + t)); }, null, null);
+    btn.disabled = false;
+    if (!ok || !sum) { say("Nem sikerült befejezni. Nézd meg a netet, és indítsd újra (nyugodtan újra lehet futtatni).", true); return; }
+    say("Kész: " + sum.users + " felhasználó, " + sum.days + " nap, " + sum.players + " buli-összesítés és " + sum.votes + " szavazat nullázva."
+      + (sum.failed ? " " + sum.failed + " régi dokumentumot nem sikerült (a konzolon látszik, melyiket)." : ""), !!sum.failed);
+    toast("Minden fogyasztás nullázva.");
   }
   function ownerUserBody(uid) {
     const wrap = el("div", { class: "settings" });

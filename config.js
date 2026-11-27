@@ -12,8 +12,8 @@ window.STRIGULA_FIREBASE = {
 };
 
 /*
-  Az adatkezelési tájékoztatóban megjelenő adatok. Ide írd a saját nevedet (te vagy az adatkezelő)
-  és egy elérhetőséget (például e-mail-címet), ahol a barátaid az adataikkal kapcsolatban elérnek.
+  Az üzemeltető (adatkezelő) neve és elérhetősége: ez jelenik meg a Felhasználási feltételekben és az
+  adatkezelési tájékoztatóban.
 */
 window.MASNAPLO_PRIVACY = {
   controller: "Rácz Zsombor Marcell",
@@ -21,8 +21,7 @@ window.MASNAPLO_PRIVACY = {
 };
 
 /*
-  A tulajdonos fiókazonosítója (UID). Az appban: Beállítások, Fiók, Fiókazonosító (Másolás gomb).
-  Ugyanezt kell beírni a firestore.rules fájl elején lévő ownerUid() részbe is, és ott Publish-olni.
+  A tulajdonos fiókazonosítója (UID). Ugyanez áll a firestore.rules fájl elején lévő ownerUid() részben is.
   Ez itt csak a Tulajdonos menüt jeleníti meg; a jogot a szerver adja a szabályok alapján.
 */
 window.MASNAPLO_OWNER_UID = "3hTaBCw1TYdBJt4mfVm3w0mEm7y1";

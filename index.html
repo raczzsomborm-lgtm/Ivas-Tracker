@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#EDF0EA" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#18231F" media="(prefers-color-scheme: dark)">
+<script>
+/* A kiválasztott megjelenés (világos/sötét) már az első rajzolás előtt érvényes legyen. */
+try {
+  var mt = localStorage.getItem("masnaplo-theme");
+  if (mt === "light" || mt === "dark") {
+    document.documentElement.setAttribute("data-theme", mt);
+    var tc = mt === "dark" ? "#18231F" : "#EDF0EA";
+    document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.setAttribute("content", tc); });
+  }
+} catch (e) {}
+</script>
 <meta name="description" content="Másnapló – Ami tegnap még jó ötletnek tűnt. Napi ivásnapló és buli számláló barátoknak.">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -158,7 +169,7 @@ main { max-width: 560px; margin: 0 auto; padding: 18px 16px 120px; }
   color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .cat-title { grid-area: title; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 20px; line-height: 1.1; min-width: 0; }
-.cat-title .emoji { font-size: 22px; }
+.cat-title .cat-big svg { width: 28px; height: 28px; }
 .cat-num { grid-area: num; align-self: center; justify-self: end; font-weight: 700; font-size: 54px; line-height: .9; color: var(--c); font-variant-numeric: tabular-nums; }
 .cat-vol { grid-area: vol; justify-self: end; font-size: 14px; color: var(--ink-soft); white-space: nowrap; }
 .tally { grid-area: tally; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-height: 28px; color: var(--c); }
@@ -211,13 +222,27 @@ main { max-width: 560px; margin: 0 auto; padding: 18px 16px 120px; }
 .p-name { font-weight: 600; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-sub { font-size: 14px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc { display: flex; flex-direction: column; align-items: center; min-width: 26px; color: var(--c); }
-.pc .e { font-size: 14px; line-height: 1.2; }
+.pc .e svg { width: 20px; height: 20px; }
+.pc .e { margin-bottom: 1px; }
 .pc .n { font-weight: 700; font-size: 22px; line-height: 1; font-variant-numeric: tabular-nums; }
 .view-title { margin: 0 0 6px; font-weight: 700; font-size: 34px; line-height: 1.05; }
 .feed-title { margin: 0 0 6px; font-weight: 700; font-size: 26px; line-height: 1.1; }
 .feed { list-style: none; margin: 0; padding: 0; }
 .feed li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; padding: 9px 0; border-bottom: 1px dashed var(--line); }
 .f-who { font-weight: 600; }
+/* Ital-ikonok (vektorgrafika) */
+.cat-ico { display: inline-grid; place-items: center; flex: none; line-height: 0; }
+.cat-ico svg { display: block; width: 1.25em; height: 1.25em; }
+.cnts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 11px; white-space: normal; overflow: visible; }
+.cnt { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.cnt .cat-ico svg { width: 18px; height: 18px; }
+.f-what { display: inline-flex; align-items: center; gap: 4px; }
+.drinks-feed li { align-items: center; }
+.f-what .cat-ico svg { width: 20px; height: 20px; }
+.pick-name { display: inline-flex; align-items: center; gap: 8px; }
+.pick-ico svg { width: 24px; height: 24px; }
+.title-ico { display: inline-grid; vertical-align: -3px; margin-right: 8px; }
+.title-ico svg { width: 32px; height: 32px; }
 .f-when { margin-left: auto; color: var(--ink-soft); font-size: 14px; white-space: nowrap; }
 
 /* Statisztika */
@@ -372,6 +397,38 @@ main { max-width: 560px; margin: 0 auto; padding: 18px 16px 120px; }
   box-shadow: 0 -10px 40px rgba(0, 0, 0, .28);
   animation: rise .22s ease-out;
 }
+/* Jelvények: elhomályosított háttér, középen egy kártya */
+.backdrop.blur { background: rgba(10, 14, 12, .3); -webkit-backdrop-filter: blur(14px) saturate(.85); backdrop-filter: blur(14px) saturate(.85); }
+.sheet.sheet-badges {
+  top: 50%; bottom: auto; left: 14px; right: 14px; transform: translateY(-50%);
+  max-width: 460px; max-height: 84vh; max-height: 84dvh;
+  padding: 6px 18px 20px; border-radius: 26px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
+  animation: badgePop .24s ease-out;
+}
+.sheet.sheet-badges .grab { display: none; }
+.badges .soon-tag { margin: 2px 0 10px; }
+.badges > p.muted { margin: 0; }
+.badge-grid { list-style: none; margin: 18px 0 4px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 10px; }
+.badge { display: flex; flex-direction: column; align-items: center; gap: 7px; min-width: 0; text-align: center; animation: badgeIn .32s ease-out both; animation-delay: calc(var(--i, 0) * 45ms); }
+.b-medal { display: grid; place-items: center; width: 74px; height: 74px; border-radius: 50%; background: var(--surface-2); border: 2px dashed var(--line); color: var(--ink-soft); font-weight: 700; font-size: 30px; line-height: 1; }
+.b-medal svg { width: 40px; height: 40px; }
+.badge.earned .b-medal { border: 2px solid var(--beer); color: var(--beer); background: var(--surface); box-shadow: 0 4px 14px rgba(0, 0, 0, .14); }
+.badge.locked .b-name { color: var(--ink-soft); }
+.b-name { max-width: 100%; font-weight: 600; font-size: 14px; line-height: 1.2; overflow-wrap: anywhere; }
+.b-desc { font-size: 12px; line-height: 1.25; color: var(--ink-soft); overflow-wrap: anywhere; }
+.badge-entry {
+  display: flex; align-items: center; gap: 14px; width: 100%; margin: 14px 0 6px; padding: 14px 14px 14px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.be-medals { display: flex; flex: none; }
+.be-medal { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--surface-2); border: 2px solid var(--surface); color: var(--beer); }
+.be-medal + .be-medal { margin-left: -12px; }
+.be-medal svg { width: 22px; height: 22px; }
+.be-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.be-title { font-weight: 700; font-size: 18px; }
+.be-sub { font-size: 14px; color: var(--ink-soft); }
 .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--line); margin: 6px auto 0; }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0 6px; }
 .sheet-title { margin: 0; font-weight: 700; font-size: 32px; line-height: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -503,7 +560,8 @@ body.has-nav .toast-zone {
 .tile { display: flex; flex-direction: column; min-width: 0; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); border-top: 5px solid var(--c); overflow: hidden; }
 .tile.quiet { background: transparent; border-style: dashed; border-top-style: solid; }
 .tile-open { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 0; padding: 8px 4px 6px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; }
-.tile-emoji { font-size: 20px; line-height: 1.2; }
+.tile-ico svg { width: 30px; height: 30px; }
+.tile-ico { margin: 0 0 2px; }
 .tile-num { display: block; font-weight: 700; font-size: 40px; line-height: 1; color: var(--c); font-variant-numeric: tabular-nums; }
 .tile-name { font-weight: 600; font-size: 14px; line-height: 1.2; }
 .tile-q { max-width: 100%; font-size: 12px; line-height: 1.2; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -576,6 +634,19 @@ body.has-nav .toast-zone {
 .gc-meta { font-size: 14px; color: var(--ink-soft); overflow-wrap: anywhere; }
 .gc-desc { font-size: 15px; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .field.area { min-height: 120px; padding: 12px 14px; resize: vertical; line-height: 1.4; }
+.game-tabs { margin: 0 0 14px; }
+.game-tabs .seg-btn { font-size: 15px; line-height: 1.15; padding: 4px 6px; }
+.users-care { margin: 0 2px 4px; }
+.gc-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.gc-tag { flex: none; margin-top: 3px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-soft); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.gc-tag.on { border-color: var(--water); color: var(--water); }
+.games-sub { margin: 14px 2px 0; font-weight: 700; font-size: 26px; line-height: 1.1; }
+.game-list > .games-sub:first-child { margin-top: 4px; }
+.gi-meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 16px; }
+.gi-meta dt { color: var(--ink-soft); }
+.gi-meta dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.game-info .care { margin: 4px 2px 0; }
+.gi-desc { margin: 0; font-size: 17px; line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
 
 /* Naptár, Térkép: hamarosan */
 .soon { padding-top: 8px; }
@@ -741,6 +812,8 @@ body.chat-typing .toast-zone { bottom: calc(66px + var(--kb, 0px)); }
 .nav-btn.center .nav-dot { top: -26px; left: calc(50% + 18px); }
 
 @keyframes fade { from { opacity: 0; } }
+@keyframes badgePop { from { opacity: 0; transform: translateY(-50%) scale(.94); } }
+@keyframes badgeIn { from { opacity: 0; transform: scale(.6); } }
 @keyframes rise { from { transform: translateY(24px); opacity: 0; } }
 
 @media (prefers-reduced-motion: reduce) {
@@ -789,7 +862,7 @@ body.chat-typing .toast-zone { bottom: calc(66px + var(--kb, 0px)); }
 </div>
 
 <script src="config.js"></script>
-<script src="app.js?v=9"></script>
-<script type="module" src="backend.js?v=9"></script>
+<script src="app.js?v=13"></script>
+<script type="module" src="backend.js?v=13"></script>
 </body>
 </html>
