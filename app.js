@@ -25,14 +25,33 @@
   const PALETTE = ["#E4572E", "#F3A712", "#3BB273", "#2D9CDB", "#9B5DE5", "#F15BB5", "#00B8A9", "#C0A16B"];
   const SVGNS = "http://www.w3.org/2000/svg";
   // A hozzájárulás verziója: ha változik, mindenki újra látja a hozzájárulási képernyőt (a feltételek lényeges módosításakor is emelni kell).
-  const CONSENT_V = "2026-11-26b";
+  const CONSENT_V = "2026-11-27";
   // A Felhasználási feltételek és az Adatkezelési tájékoztató „Utolsó módosítás” dátuma.
-  const TERMS_DATE = "2026. november 26.";
-  const PRIVACY_DATE = "2026. november 26.";
+  const TERMS_DATE = "2026. november 27.";
+  const PRIVACY_DATE = "2026. november 27.";
   const MIGRATION_V = 1;
   const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
   const RECENT_DAY = 10;
   const GAME_MAX = { name: 60, players: 30, tools: 300, desc: 2000 };
+  // Kocsmák: a 10 választható profilkép, a név és az üzenet hossza, a meghívókód és az azonosító formája.
+  const KICONS = [
+    { id: "01", file: "01-koccinto-korsok.svg", name: "Koccintó korsók" },
+    { id: "02", file: "02-sorcsap.svg", name: "Sörcsap" },
+    { id: "03", file: "03-hordo.svg", name: "Hordó" },
+    { id: "04", file: "04-harom-kupica.svg", name: "Három kupica" },
+    { id: "05", file: "05-tequila.svg", name: "Tequila" },
+    { id: "06", file: "06-martini.svg", name: "Martini" },
+    { id: "07", file: "07-bor-es-pohar.svg", name: "Bor és pohár" },
+    { id: "08", file: "08-koccinto-borospoharak.svg", name: "Koccintó borospoharak" },
+    { id: "09", file: "09-diszkogomb.svg", name: "Diszkógömb" },
+    { id: "10", file: "10-ejszakai-sor.svg", name: "Éjszakai sör" },
+  ];
+  const KICON_BY_ID = Object.fromEntries(KICONS.map(i => [i.id, i]));
+  const KNAME_MAX = 40;
+  const MSG_MAX = 500;
+  const MSG_PAGE = 50;
+  const KCODE_RE = /^[a-z0-9]{8}$/;
+  const KID_RE = /^[A-Za-z0-9]{10,40}$/;
   const TABS = ["games", "calendar", "kocsma", "map", "profile"];
   const OWNER_UID = (() => {
     const u = window.MASNAPLO_OWNER_UID;
@@ -187,6 +206,18 @@
     installPrompt: null,
     units: lsGet("strigula-units") === "imperial" ? "imperial" : "metric",
     chartTip: null, chartScroll: {},
+    // kocsmák
+    privK: null,                 // a private.kocsmak: kocsma azonosító → belépés ideje (a kocsmáim)
+    kocsmak: new Map(),          // kocsma azonosító → { name, icon, code, owner, party, createdAt } (élő)
+    kUnsubs: new Map(),
+    kocsma: null,                // az aktív kocsma
+    kMembers: new Map(), kMembersLoaded: false, kMembersUnsub: null,
+    kMsgs: [], kMsgsLoaded: false, kMsgsFull: false, kMsgsError: false, kMsgsUnsub: null, kMsgLimit: MSG_PAGE,
+    kScreen: null, kUser: null, kMonth: null, kLeaving: new Set(), kInvite: null, chatScrollDown: false,
+    kMembersServer: null, kClaiming: false, kClaimTimer: null, kRepaired: new Set(),
+    // barátok
+    friends: new Map(), friendsLoaded: false, reqIn: new Map(), reqOut: new Map(), socialError: false,
+    dismissing: new Set(), profUser: null,
   };
 
   /* ---------- buli kódok és a Bulijaim lista (ezen a telefonon) ---------- */
@@ -807,6 +838,8 @@
     S.tab = "kocsma";
     S.partyOpen = code && code !== todayParty() ? code : null;
     S.person = null;
+    S.kUser = null;
+    S.kScreen = null;
     if (code) { unhideParty(code); rememberParty(code, { at: Date.now() }); }
     renderAll();
     window.scrollTo(0, 0);
@@ -1148,7 +1181,8 @@
     for (const d of S.days.values()) if (d.party) codes.add(d.party);
     S.deleting = true;
     try {
-      await S.backend.deleteAccount(pw, [...codes]);
+      const kids = new Set([...Object.keys(S.privK || {}), ...S.kocsmak.keys()]);
+      await S.backend.deleteAccount(pw, [...codes], [...kids]);
     } catch (e) {
       console.error(e);
       S.deleting = false;
@@ -1159,7 +1193,7 @@
       else say(authErrorText(e), true);
       return;
     }
-    for (const k of ["strigula-party", "strigula-parties", "strigula-hidden-parties", "strigula-units", "strigula-install-hidden", "strigula-pending-email", "strigula-id", "strigula-name"]) lsSet(k, null);
+    for (const k of ["strigula-party", "strigula-parties", "strigula-hidden-parties", "strigula-units", "strigula-install-hidden", "strigula-pending-email", "strigula-id", "strigula-name", "masnaplo-kocsma", "masnaplo-chat-read"]) lsSet(k, null);
     S.phase = "boot";
     say("A fiókodat és az adataidat töröltük. Viszlát!");
     restart(1800);
@@ -1188,6 +1222,8 @@
   }
   async function logout() {
     flushAll();
+    lsSet("masnaplo-kocsma", null);
+    lsSet("masnaplo-chat-read", null);
     try { await S.backend.signOut(); } catch (e) {}
     restart();
   }
@@ -1291,8 +1327,599 @@
       });
     } catch (e) {}
   }
+  /* ---------- barátok és kocsmák: adatok ---------- */
+  function cleanKName(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().slice(0, KNAME_MAX); }
+  // Meghívókód: 8 kisbetű vagy szám. Egy bemásolt meghívó linkből is kiolvassuk.
+  function cleanKCode(raw) {
+    let s = String(raw == null ? "" : raw).trim();
+    const m = s.match(/[?&]kocsma=([^&#\s]+)/i);
+    if (m) s = decodeURIComponent(m[1]);
+    s = s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return KCODE_RE.test(s) ? s : null;
+  }
+  function kIcon(id, size) {
+    const ic = KICON_BY_ID[id] || KICONS[0];
+    const px = size === "xl" ? 76 : size === "lg" ? 56 : size === "md" ? 44 : 32;
+    return el("img", { class: "kicon" + (size ? " " + size : ""), src: "icons/kocsma/" + ic.file, alt: "", width: px, height: px, draggable: "false" });
+  }
+  function sanitizeKocsma(d) {
+    const src = d && typeof d === "object" ? d : {};
+    const p = src.party && typeof src.party === "object" ? src.party : null;
+    const party = p && typeof p.code === "string" && cleanParty(p.code) === p.code && typeof p.day === "string" && DAY_RE.test(p.day)
+      ? { code: p.code, day: p.day, by: typeof p.by === "string" ? p.by : "" } : null;
+    return {
+      name: cleanKName(src.name) || "Névtelen kocsma",
+      icon: KICON_BY_ID[src.icon] ? src.icon : "01",
+      code: typeof src.code === "string" && KCODE_RE.test(src.code) ? src.code : "",
+      owner: typeof src.owner === "string" ? src.owner : "",
+      party, createdAt: num(src.createdAt),
+    };
+  }
+  function sanitizeMsg(id, d) {
+    if (!d || typeof d.uid !== "string" || typeof d.text !== "string") return null;
+    const text = cleanText(d.text, MSG_MAX);
+    return text ? { id, uid: d.uid, text, at: num(d.at) } : null;
+  }
+  function sanitizeInvite(v) {
+    if (!v || typeof v !== "object" || typeof v.kid !== "string" || !KID_RE.test(v.kid) || typeof v.code !== "string" || !KCODE_RE.test(v.code)) return null;
+    return { kid: v.kid, code: v.code, name: cleanKName(v.name) || "Kocsma", icon: KICON_BY_ID[v.icon] ? v.icon : "01", at: num(v.at) };
+  }
+  function userName(uid) {
+    if (uid === S.myId && S.username) return S.username;
+    const st = S.stats.get(uid);
+    return (st && st.username) || "Ismeretlen";
+  }
+  function byName(a, b) { return userName(a).localeCompare(userName(b), "hu", { sensitivity: "base" }); }
+  function kocsmaList() {
+    return [...S.kocsmak.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name, "hu", { sensitivity: "base" }) || (a[0] < b[0] ? -1 : 1));
+  }
+  function activeK() { return S.kocsma ? S.kocsmak.get(S.kocsma) || null : null; }
+  function isKFounder() { const k = activeK(); return !!k && k.owner === S.myId; }
+  // A kocsmáim még töltődnek (van a listában, de egyik sem jött meg).
+  function kLoading() { return !!S.privK && Object.keys(S.privK).length > 0 && !S.kocsmak.size; }
+  function kRead() {
+    try { const o = JSON.parse(lsGet("masnaplo-chat-read") || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; }
+  }
+  function lastRead(kid) {
+    const v = num(kRead()[kid]);
+    return v || (S.privK && num(S.privK[kid])) || 0;
+  }
+  function markRead() {
+    const kid = S.kocsma;
+    if (!kid || !S.kMsgsLoaded || !S.kMsgs.length) return;
+    const top = S.kMsgs[S.kMsgs.length - 1].at;
+    const o = kRead();
+    if (num(o[kid]) >= top) return;
+    o[kid] = top;
+    lsSet("masnaplo-chat-read", JSON.stringify(o));
+  }
+  function unreadCount() {
+    if (!S.kocsma || !S.kMsgsLoaded) return 0;
+    const lr = lastRead(S.kocsma);
+    return S.kMsgs.filter(m => m.at > lr && m.uid !== S.myId).length;
+  }
+  function pendingInvites() {
+    return [...S.friends.entries()].filter(([, f]) => f.invite && !S.kocsmak.has(f.invite.kid));
+  }
+
+  function subscribePrivate() {
+    if (typeof S.backend.watchPrivate !== "function") return;
+    try {
+      S.backend.watchPrivate((data) => {
+        const src = data && data.kocsmak && typeof data.kocsmak === "object" ? data.kocsmak : {};
+        const next = {};
+        for (const [kid, at] of Object.entries(src)) if (KID_RE.test(kid)) next[kid] = num(at) || 1;
+        S.privK = next;
+        syncKocsmak();
+        if (S.phase === "ready") renderAll();
+      }, (e) => { if (errCode(e) === "permission-denied") checkBanned(); });
+    } catch (e) {}
+  }
+  // A kocsmáim figyelése: amelyik a listában van, azt figyeljük; amelyik kikerült, azt elengedjük.
+  function syncKocsmak() {
+    if (!S.backend || typeof S.backend.watchKocsma !== "function") return;
+    const want = S.privK || {};
+    for (const kid of Object.keys(want)) if (!S.kUnsubs.has(kid)) watchK(kid);
+    for (const kid of [...S.kUnsubs.keys()]) if (!(kid in want)) stopK(kid);
+    ensureActive();
+  }
+  function watchK(kid) {
+    let unsub = null;
+    try {
+      unsub = S.backend.watchKocsma(kid, (data) => {
+        if (!S.kUnsubs.has(kid)) return;
+        if (!data) { lostKocsma(kid); return; }
+        S.kocsmak.set(kid, sanitizeKocsma(data));
+        ensureActive();
+        if (S.kocsma === kid) maybeClaimKocsma();
+        if (S.kocsma === kid && data.party && data.party.code) fetchPartyNames([data.party.code]);
+        if (S.phase === "ready") renderAll();
+      }, (e) => {
+        if (!S.kUnsubs.has(kid)) return;
+        if (errCode(e) === "permission-denied") lostKocsma(kid);
+      });
+    } catch (e) {}
+    S.kUnsubs.set(kid, unsub || (() => {}));
+  }
+  function stopK(kid) {
+    const u = S.kUnsubs.get(kid);
+    S.kUnsubs.delete(kid);
+    if (u) { try { u(); } catch (e) {} }
+    S.kocsmak.delete(kid);
+    if (S.kocsma === kid) setActiveKocsma(null);
+  }
+  // Kikerültem egy kocsmából (az alapító eltávolított, vagy megszűnt): eltakarítjuk a nyomait.
+  function lostKocsma(kid) {
+    const k = S.kocsmak.get(kid);
+    const leaving = S.kLeaving.has(kid);
+    stopK(kid);
+    if (S.privK) delete S.privK[kid];
+    if (!leaving) {
+      checkBanned();
+      if (typeof S.backend.cleanupKocsma === "function") Promise.resolve().then(() => S.backend.cleanupKocsma(kid)).catch(() => {});
+      if (k) toast("A(z) „" + k.name + "” kocsmának már nem vagy tagja: megszűnt, vagy az alapító eltávolított.");
+    }
+    ensureActive();
+    if (S.phase === "ready") renderAll();
+  }
+  function ensureActive() {
+    if (S.kocsma && S.kocsmak.has(S.kocsma)) return;
+    const saved = lsGet("masnaplo-kocsma");
+    // Ha a legutóbb választott kocsma még töltődik, megvárjuk.
+    if (saved && S.privK && saved in S.privK && S.kUnsubs.has(saved) && !S.kocsmak.has(saved)) {
+      if (S.kocsma) setActiveKocsma(null);
+      return;
+    }
+    let pick = saved && S.kocsmak.has(saved) ? saved : null;
+    if (!pick) {
+      const ids = [...S.kocsmak.keys()].sort((a, b) => num(S.privK && S.privK[b]) - num(S.privK && S.privK[a]) || (a < b ? -1 : 1));
+      pick = ids[0] || null;
+    }
+    setActiveKocsma(pick);
+  }
+  function setActiveKocsma(kid, remember) {
+    if (remember && kid) lsSet("masnaplo-kocsma", kid);
+    if (S.kocsma === kid) return;
+    if (S.kMembersUnsub) { try { S.kMembersUnsub(); } catch (e) {} S.kMembersUnsub = null; }
+    if (S.kMsgsUnsub) { try { S.kMsgsUnsub(); } catch (e) {} S.kMsgsUnsub = null; }
+    S.kocsma = kid;
+    S.kMembers = new Map();
+    S.kMembersLoaded = false;
+    S.kMembersServer = null;
+    S.kMsgs = [];
+    S.kMsgsLoaded = false;
+    S.kMsgsFull = false;
+    S.kMsgsError = false;
+    S.kMsgLimit = MSG_PAGE;
+    S.kUser = null;
+    if (!kid) { S.kScreen = null; return; }
+    subscribeKMembers();
+    subscribeKMsgs();
+  }
+  function subscribeKMembers() {
+    const kid = S.kocsma;
+    if (!kid || typeof S.backend.watchKMembers !== "function") return;
+    try {
+      S.kMembersUnsub = S.backend.watchKMembers(kid, (snap) => {
+        if (S.kocsma !== kid) return;
+        const m = new Map();
+        for (const d of snap.docs) m.set(d.id, { at: num(d.data && d.data.at) });
+        S.kMembers = m;
+        S.kMembersLoaded = true;
+        // A szerver szerint már nem vagyok tag (pl. az alapító eltávolított).
+        if (!snap.fromCache && !m.has(S.myId) && !S.kLeaving.has(kid)) { lostKocsma(kid); return; }
+        if (!snap.fromCache) S.kMembersServer = kid;
+        maybeClaimKocsma();
+        maybeRepairKCode();
+        if (S.phase === "ready") renderAll();
+      }, (e) => {
+        if (S.kocsma !== kid) return;
+        if (errCode(e) === "permission-denied") lostKocsma(kid);
+      });
+    } catch (e) {}
+  }
+  // Ha az alapító már nem tag (pl. letiltva törölte a fiókját), a legrégebbi tag telefonja átveszi a kocsmát.
+  function orphanedForMe() {
+    const kid = S.kocsma;
+    const k = activeK();
+    if (!k || !k.owner || S.kMembersServer !== kid || !S.kMembers.size || S.kMembers.has(k.owner)) return null;
+    const oldest = [...S.kMembers.entries()].sort((a, b) => a[1].at - b[1].at || (a[0] < b[0] ? -1 : 1))[0][0];
+    return oldest === S.myId ? kid : null;
+  }
+  // Egy alapítói szerep átadásakor a tagság és a kocsma pár pillanat eltéréssel érkezhet: csak akkor lépünk,
+  // ha néhány másodperc múlva is alapító nélküli a kocsma.
+  function maybeClaimKocsma() {
+    if (S.kClaiming || S.kClaimTimer || !orphanedForMe()) return;
+    S.kClaimTimer = setTimeout(() => { S.kClaimTimer = null; claimKocsma(); }, 3000);
+  }
+  function claimKocsma() {
+    const kid = orphanedForMe();
+    const k = activeK();
+    if (!kid || !k || S.kClaiming || typeof S.backend.claimKocsma !== "function" || !canEdit()) return;
+    S.kClaiming = true;
+    Promise.resolve().then(() => S.backend.claimKocsma(kid))
+      .then(() => {
+        const kk = S.kocsmak.get(kid);
+        if (kk) kk.owner = S.myId;
+        toast("A(z) „" + k.name + "” kocsma alapítója már nem tag, ezért mostantól te kezeled.");
+        renderAll();
+        maybeRepairKCode();
+      })
+      .catch(() => {})
+      .finally(() => { S.kClaiming = false; });
+  }
+  // Alapítóként munkamenetenként egyszer ellenőrizzük, hogy a meghívókód előnézetében csak a mostani tagok vannak.
+  function maybeRepairKCode() {
+    const kid = S.kocsma;
+    const k = activeK();
+    if (!k || k.owner !== S.myId || S.kMembersServer !== kid || S.kRepaired.has(kid) || !canEdit() || typeof S.backend.repairKCode !== "function") return;
+    S.kRepaired.add(kid);
+    Promise.resolve().then(() => S.backend.repairKCode(kid)).catch(() => S.kRepaired.delete(kid));
+  }
+  function subscribeKMsgs() {
+    const kid = S.kocsma;
+    const n = S.kMsgLimit;
+    if (!kid || typeof S.backend.watchKMessages !== "function") return;
+    if (S.kMsgsUnsub) { try { S.kMsgsUnsub(); } catch (e) {} S.kMsgsUnsub = null; }
+    try {
+      S.kMsgsUnsub = S.backend.watchKMessages(kid, n, (snap) => {
+        if (S.kocsma !== kid || S.kMsgLimit !== n) return;
+        S.kMsgs = snap.docs.map(d => sanitizeMsg(d.id, d.data)).filter(Boolean)
+          .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
+        S.kMsgsLoaded = true;
+        S.kMsgsFull = snap.docs.length < n;
+        S.kMsgsError = false;
+        if (S.kScreen === "chat" && S.tab === "kocsma" && !document.hidden) markRead();
+        if (S.phase === "ready") renderAll();
+      }, (e) => {
+        if (S.kocsma !== kid) return;
+        if (errCode(e) === "permission-denied") { S.kMsgsError = true; S.kMsgsLoaded = true; if (S.phase === "ready") renderAll(); }
+      });
+    } catch (e) {}
+  }
+  function moreMsgs() {
+    S.kMsgLimit += MSG_PAGE;
+    subscribeKMsgs();
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && S.kScreen === "chat" && S.tab === "kocsma") { markRead(); if (S.phase === "ready") renderAll(); }
+  });
+
+  function subscribeSocial() {
+    if (typeof S.backend.watchFriends !== "function") { S.friendsLoaded = true; return; }
+    const onErr = (e) => { if (errCode(e) === "permission-denied") { S.socialError = true; checkBanned(); if (S.phase === "ready") renderAll(); } };
+    try {
+      S.backend.watchFriends((snap) => {
+        const m = new Map();
+        for (const d of snap.docs) m.set(d.id, { at: num(d.data && d.data.at), invite: sanitizeInvite(d.data && d.data.invite) });
+        S.friends = m;
+        S.friendsLoaded = true;
+        if (S.phase === "ready") renderAll();
+      }, onErr);
+      S.backend.watchFriendReqs("to", (snap) => {
+        const m = new Map();
+        for (const d of snap.docs) if (d.data && typeof d.data.from === "string" && d.data.to === S.myId) m.set(d.data.from, { at: num(d.data.at) });
+        S.reqIn = m;
+        if (S.phase === "ready") renderAll();
+      }, onErr);
+      S.backend.watchFriendReqs("from", (snap) => {
+        const m = new Map();
+        for (const d of snap.docs) if (d.data && typeof d.data.to === "string" && d.data.from === S.myId) m.set(d.data.to, { at: num(d.data.at) });
+        S.reqOut = m;
+        if (S.phase === "ready") renderAll();
+      }, onErr);
+    } catch (e) {}
+  }
+
+  /* ---------- barátok: műveletek ---------- */
+  function socialErrorText(e) {
+    return errCode(e) === "permission-denied" ? RULES_MSG : "Nem sikerült. Nézd meg a netet, és próbáld újra.";
+  }
+  async function sendFriendRequest(uid) {
+    if (!canEdit() || !uid || uid === S.myId) return false;
+    if (S.friends.has(uid)) { toast("Már barátok vagytok."); return false; }
+    if (S.reqIn.has(uid)) return acceptFriend(uid);
+    if (S.reqOut.has(uid)) { toast("Már jelölted, válaszra vár."); return false; }
+    try {
+      await S.backend.sendFriendRequest(uid);
+      S.reqOut.set(uid, { at: Date.now() });
+      renderAll();
+      toast("Barátkérés elküldve: " + userName(uid));
+      return true;
+    } catch (e) { console.error(e); toast(socialErrorText(e)); return false; }
+  }
+  async function sendFriendRequestByName(raw, say) {
+    const name = String(raw || "").trim();
+    if (!USERNAME_RE.test(name)) { say("A felhasználónév: " + USERNAME_HINT, true); return false; }
+    const key = name.toLowerCase();
+    if (key === S.usernameKey) { say("Saját magadat nem jelölheted barátnak.", true); return false; }
+    say("Keresés…");
+    let found = null;
+    try { found = await S.backend.lookupUsername(key); }
+    catch (e) { say(socialErrorText(e), true); return false; }
+    if (!found || typeof found.uid !== "string") { say("Nincs ilyen felhasználó.", true); return false; }
+    if (found.uid === S.myId) { say("Saját magadat nem jelölheted barátnak.", true); return false; }
+    if (S.friends.has(found.uid)) { say("Már barátok vagytok.", true); return false; }
+    if (S.reqOut.has(found.uid)) { say("Már jelölted, válaszra vár.", true); return false; }
+    const ok = await sendFriendRequest(found.uid);
+    if (!ok) say("");
+    return ok;
+  }
+  async function acceptFriend(uid) {
+    if (!canEdit()) return false;
+    try {
+      await S.backend.acceptFriend(uid, S.reqOut.has(uid));
+      S.reqIn.delete(uid);
+      S.reqOut.delete(uid);
+      if (!S.friends.has(uid)) S.friends.set(uid, { at: Date.now(), invite: null });
+      renderAll();
+      toast("Mostantól barátok vagytok: " + userName(uid));
+      return true;
+    } catch (e) { console.error(e); toast(socialErrorText(e)); return false; }
+  }
+  async function declineFriend(uid) {
+    try { await S.backend.declineFriend(uid); S.reqIn.delete(uid); renderAll(); toast("Barátkérés elutasítva."); }
+    catch (e) { console.error(e); toast(socialErrorText(e)); }
+  }
+  async function cancelFriendRequest(uid) {
+    try { await S.backend.cancelFriendRequest(uid); S.reqOut.delete(uid); renderAll(); toast("Barátkérés visszavonva."); }
+    catch (e) { console.error(e); toast(socialErrorText(e)); }
+  }
+  async function removeFriend(uid) {
+    try { await S.backend.removeFriend(uid); S.friends.delete(uid); renderAll(); toast(userName(uid) + " már nem a barátod."); }
+    catch (e) { console.error(e); toast(socialErrorText(e)); }
+  }
+  async function sendKInvite(fid, kid) {
+    const k = S.kocsmak.get(kid);
+    if (!k || !k.code || !canEdit()) return false;
+    try {
+      await S.backend.sendKInvite(fid, { kid, code: k.code, name: k.name, icon: k.icon, at: Date.now() });
+      toast("Meghívó elküldve: " + userName(fid) + " → " + k.name);
+      return true;
+    } catch (e) { console.error(e); toast(socialErrorText(e)); return false; }
+  }
+  function inviteFriend(fid) {
+    const list = kocsmaList().filter(([kid]) => !(kid === S.kocsma && S.kMembers.has(fid)));
+    if (!list.length) { toast("Még nincs kocsmád. Alapíts egyet a Kocsma fülön."); return; }
+    if (list.length === 1) { sendKInvite(fid, list[0][0]); return; }
+    openSheet({ type: "kPick", uid: fid });
+  }
+  function dismissInvite(fid, quiet) {
+    if (S.dismissing.has(fid)) return;
+    S.dismissing.add(fid);
+    const f = S.friends.get(fid);
+    if (f) f.invite = null;
+    Promise.resolve().then(() => S.backend.dismissKInvite(fid))
+      .catch((e) => { if (!quiet) toast(socialErrorText(e)); })
+      .finally(() => S.dismissing.delete(fid));
+    if (!quiet) renderAll();
+  }
+
+  /* ---------- kocsmák: műveletek ---------- */
+  function kErrorText(e) {
+    const c = errCode(e);
+    if (c === "permission-denied") return "A szerver nem engedte. Lehet, hogy közben változott a kocsma (vagy a meghívókódja), vagy elavultak a Firestore szabályok.";
+    if (c === "app/no-kocsma") return "Ez a kocsma már nem létezik.";
+    return "Nem sikerült. Nézd meg a netet, és próbáld újra.";
+  }
+  function openKocsmaTab(kid) {
+    if (kid) setActiveKocsma(kid, true);
+    closeSheet();
+    S.tab = "kocsma";
+    S.partyOpen = null;
+    S.person = null;
+    S.kUser = null;
+    S.kScreen = null;
+    renderAll();
+    window.scrollTo(0, 0);
+  }
+  async function createKocsma(rawName, icon, say, btn) {
+    const name = cleanKName(rawName);
+    if (!name) { say("Adj nevet a kocsmának.", true); return; }
+    if (!KICON_BY_ID[icon]) { say("Válassz profilképet.", true); return; }
+    if (!canEdit()) return;
+    btn.disabled = true;
+    say("Alapítás…");
+    try {
+      const r = await S.backend.createKocsma(name, icon);
+      S.privK = Object.assign({}, S.privK || {}, { [r.kid]: Date.now() });
+      S.kocsmak.set(r.kid, { name, icon, code: r.code, owner: S.myId, party: null, createdAt: Date.now() });
+      syncKocsmak();
+      openKocsmaTab(r.kid);
+      toast("Megalapítottad a(z) „" + name + "” kocsmát. A Meghívás gombbal hívhatod meg a barátaidat.");
+    } catch (e) {
+      console.error(e);
+      btn.disabled = false;
+      say(errCode(e) === "permission-denied" ? RULES_MSG : kErrorText(e), true);
+    }
+  }
+  async function joinKocsma(kid, code, preview, from, say, btn) {
+    if (!canEdit()) return;
+    if (S.kocsmak.has(kid)) { if (from) dismissInvite(from, true); openKocsmaTab(kid); return; }
+    btn.disabled = true;
+    say("Belépés…");
+    try {
+      await S.backend.joinKocsma(kid, code);
+      S.privK = Object.assign({}, S.privK || {}, { [kid]: Date.now() });
+      S.kocsmak.set(kid, { name: preview.name, icon: preview.icon, code, owner: "", party: null, createdAt: 0 });
+      syncKocsmak();
+      if (from) dismissInvite(from, true);
+      openKocsmaTab(kid);
+      toast("Beléptél a(z) „" + preview.name + "” kocsmába.");
+    } catch (e) {
+      console.error(e);
+      btn.disabled = false;
+      let still = null;
+      try { still = await S.backend.getKCode(code); } catch (e2) {}
+      if (!still || still.kid !== kid) say("Ezt a meghívókódot közben lecserélték. Kérj új meghívót a kocsma alapítójától.", true);
+      else say(errCode(e) === "permission-denied" ? "A szerver nem engedte a belépést. Lehet, hogy elavultak a Firestore szabályok." : kErrorText(e), true);
+    }
+  }
+  function afterKLeave(kid) {
+    stopK(kid);
+    if (S.privK) delete S.privK[kid];
+    ensureActive();
+    setTimeout(() => S.kLeaving.delete(kid), 15000);
+  }
+  async function leaveKocsma(kid) {
+    const k = S.kocsmak.get(kid);
+    if (!k || !canEdit()) return;
+    S.kLeaving.add(kid);
+    try {
+      const r = await S.backend.leaveKocsma(kid);
+      afterKLeave(kid);
+      openKocsmaTab(null);
+      toast(r === "deleted" ? "Kiléptél, és mivel te voltál az utolsó tag, a(z) „" + k.name + "” kocsma megszűnt."
+        : r === "transferred" ? "Kiléptél a(z) „" + k.name + "” kocsmából. A kocsmát a legrégebbi tag kapta meg."
+          : "Kiléptél a(z) „" + k.name + "” kocsmából.");
+    } catch (e) {
+      console.error(e);
+      S.kLeaving.delete(kid);
+      toast(kErrorText(e));
+    }
+  }
+  async function deleteKocsma(kid) {
+    const k = S.kocsmak.get(kid);
+    if (!k || k.owner !== S.myId || !canEdit()) return;
+    S.kLeaving.add(kid);
+    toast("A kocsma törlése folyamatban…");
+    try {
+      await S.backend.deleteKocsma(kid);
+      afterKLeave(kid);
+      openKocsmaTab(null);
+      toast("A(z) „" + k.name + "” kocsma minden adatával együtt törölve.");
+    } catch (e) {
+      console.error(e);
+      S.kLeaving.delete(kid);
+      toast(kErrorText(e));
+    }
+  }
+  async function kickMember(kid, uid) {
+    try {
+      const code = await S.backend.rotateKCode(kid, uid);
+      toast(userName(uid) + " kikerült a kocsmából. Az új meghívókód: " + code);
+      if (S.sheet && S.sheet.type === "kSet") openSheet({ type: "kSet" });
+    } catch (e) { console.error(e); toast(kErrorText(e)); }
+  }
+  async function newKCode(kid) {
+    try {
+      const code = await S.backend.rotateKCode(kid, null);
+      toast("Új meghívókód: " + code + ". A régi kód és a régi linkek már nem működnek.");
+      if (S.sheet && (S.sheet.type === "kSet" || S.sheet.type === "kInvite")) openSheet({ type: S.sheet.type });
+    } catch (e) { console.error(e); toast(kErrorText(e)); }
+  }
+  async function updateKocsma(kid, patch) {
+    try {
+      await S.backend.updateKocsma(kid, patch);
+      const k = S.kocsmak.get(kid);
+      if (k) Object.assign(k, patch);
+      renderAll();
+      toast(patch.name ? "A kocsma neve elmentve." : "A kocsma profilképe elmentve.");
+      return true;
+    } catch (e) { console.error(e); toast(kErrorText(e)); return false; }
+  }
+  function kInviteUrl(code) {
+    const u = new URL(location.href);
+    u.search = "";
+    u.hash = "";
+    u.searchParams.set("kocsma", code);
+    return u.toString();
+  }
+  async function shareKInvite(k) {
+    if (!k || !k.code) return;
+    const url = kInviteUrl(k.code);
+    if (navigator.share) {
+      try { await navigator.share({ title: "Másnapló", text: "Gyere a(z) „" + k.name + "” kocsmába! A meghívókód: " + k.code, url }); return; }
+      catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    try { await navigator.clipboard.writeText(url); toast("Link kimásolva, küldd el a barátaidnak."); }
+    catch (e) { toast("A meghívó link: " + url); }
+  }
+
+  /* ---------- kocsmás buli ---------- */
+  function kPartyToday(k) { return k && k.party && k.party.day === todayKey() ? k.party : null; }
+  function joinKParty(k) {
+    const p = kPartyToday(k);
+    if (!p || !canEdit()) return;
+    const cur = todayParty();
+    const go = async () => { if (await assignDay(todayKey(), p.code)) toast("Csatlakoztál a kocsmás buliba: " + partyName(p.code)); };
+    if (cur && cur !== p.code) {
+      openSheet({ type: "confirm", title: "Kocsmás buli", safe: true, label: "Átteszem",
+        text: "A mai napod most a(z) „" + partyName(cur) + "” bulihoz tartozik. Átkerül a kocsmás buliba („" + partyName(p.code) + "”).", action: go });
+    } else go();
+  }
+  function kPartyAction() {
+    const kid = S.kocsma;
+    const k = activeK();
+    if (!k || !canEdit()) return;
+    const p = kPartyToday(k);
+    if (p) {
+      if (todayParty() === p.code) { toast("Már a kocsmás buliban vagy: lent látod a versenyt."); return; }
+      joinKParty(k);
+      return;
+    }
+    const name = cleanPartyName(k.name + ", " + dayLabel(todayKey()));
+    const cur = todayParty();
+    openSheet({ type: "confirm", title: "Kocsmás buli", safe: true, label: "Indítás",
+      text: "Indul a(z) „" + name + "” buli. A mai napod ebbe kerül, a kocsma tagjai pedig a Kocsma fülön egy gombbal csatlakozhatnak."
+        + (cur ? " Most a(z) „" + partyName(cur) + "” buliban vagy: a mai napod átkerül." : ""),
+      action: () => startKParty(kid, name) });
+  }
+  async function startKParty(kid, name) {
+    const ok = await createParty(todayKey(), name);
+    const code = todayParty();
+    if (!ok || !code) return;
+    try {
+      await S.backend.setKocsmaParty(kid, { code, day: todayKey(), by: S.myId });
+      const k = S.kocsmak.get(kid);
+      if (k) k.party = { code, day: todayKey(), by: S.myId };
+      renderAll();
+      toast("Kocsmás buli indult. A tagok a Kocsma fülön csatlakozhatnak.");
+    } catch (e) {
+      console.error(e);
+      toast(errCode(e) === "permission-denied" ? RULES_MSG : "A buli elindult, de a kocsmába nem sikerült beírni. Nézd meg a netet.");
+    }
+  }
+
+  /* ---------- havi ranglista ---------- */
+  function curMonth() { return todayKey().slice(0, 7); }
+  function shiftMonth(ym, n) {
+    const p = ym.split("-").map(Number);
+    const d = new Date(p[0], p[1] - 1 + n, 1, 12);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+  }
+  function monthLabel(ym) {
+    const p = ym.split("-").map(Number);
+    try { return new Date(p[0], p[1] - 1, 1, 12).toLocaleDateString("hu-HU", { year: "numeric", month: "long" }); }
+    catch (e) { return ym; }
+  }
+  function monthCounts(uid, ym) {
+    const st = statsOf(uid);
+    const o = emptyCounts();
+    for (const [k, c] of Object.entries(st.days)) {
+      if (!k.startsWith(ym + "-")) continue;
+      for (const cat of CATS) o[cat.id] += Math.max(0, c[cat.id]);
+    }
+    return o;
+  }
+  function countsPts(c) { return CATS.reduce((s, cat) => s + cat.pts * Math.max(0, c[cat.id]), 0); }
+  function monthRows(ym) {
+    const rows = [...S.kMembers.keys()].map(uid => { const c = monthCounts(uid, ym); return { uid, c, pts: countsPts(c) }; });
+    rows.sort((a, b) => b.pts - a.pts || byName(a.uid, b.uid));
+    for (const r of rows) r.rank = 1 + rows.filter(o => o.pts > r.pts).length;
+    return rows;
+  }
+
   // Meghívó link (?buli=kód): rákérdezünk, hogy a mai nap ehhez a bulihoz kerüljön-e.
   function maybeInvite() {
+    if (!S.invite && S.kInvite && S.phase === "ready" && !S.sheet) {
+      const code = S.kInvite;
+      S.kInvite = null;
+      S.tab = "kocsma";
+      renderAll();
+      openSheet({ type: "kJoin", code });
+      return;
+    }
     if (!S.invite || S.phase !== "ready" || !S.daysLoaded || S.sheet) return;
     const code = S.invite;
     S.invite = null;
@@ -1310,12 +1937,21 @@
       const u = new URL(location.href);
       const c = cleanParty(u.searchParams.get("buli"));
       if (c) S.invite = c;
-      if (u.searchParams.has("buli")) { u.searchParams.delete("buli"); history.replaceState(null, "", u.toString()); }
+      const kc = cleanKCode(u.searchParams.get("kocsma"));
+      if (kc) S.kInvite = kc;
+      if (u.searchParams.has("buli") || u.searchParams.has("kocsma")) {
+        u.searchParams.delete("buli");
+        u.searchParams.delete("kocsma");
+        history.replaceState(null, "", u.toString());
+      }
     } catch (e) {}
     restoreParties();
     subscribeStats();
     subscribeDays();
     subscribeGames();
+    subscribePrivate();
+    syncKocsmak();
+    subscribeSocial();
     if (S.isOwner && typeof S.backend.watchBans === "function") {
       try { S.backend.watchBans((ids) => { S.bans = new Set(ids); }, () => {}); } catch (e) {}
     }
@@ -1341,6 +1977,11 @@
   const ICON_BACK = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg>';
   const ICON_NEXT = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>';
   const ICON_SEARCH = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><line x1="16" y1="16" x2="20.5" y2="20.5"/></svg>';
+  const ICON_CHAT = SVG_OPEN + '<path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.4-4.6A7.5 7.5 0 1 1 20 12.5z"/></svg>';
+  const ICON_PARTY = SVG_OPEN + '<path d="M4 20l4.5-12 7.5 7.5z"/><line x1="14" y1="4" x2="14.5" y2="6"/><line x1="18.5" y1="5.5" x2="17" y2="7"/><line x1="20" y1="10" x2="18" y2="10.5"/><path d="M11.5 3.5c.8 1.5.2 3-1 3.8"/></svg>';
+  const ICON_INVITE = SVG_OPEN + '<circle cx="9.5" cy="8" r="3.5"/><path d="M3 20a6.5 6.5 0 0 1 13 0"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="16" y1="11" x2="22" y2="11"/></svg>';
+  const ICON_GEAR = SVG_OPEN + '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
+  const ICON_SWAP = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 9 12 4 17 9"/><polyline points="7 15 12 20 17 15"/></svg>';
   function iconSpan(html, cls) { const s = el("span", { class: cls || "ico", "aria-hidden": "true" }); s.innerHTML = html; return s; }
 
   /* ---------- keret: alsó sáv és lebegő gombok ---------- */
@@ -1358,8 +1999,9 @@
       const inner = el("div", { class: "nav-inner" });
       for (const n of NAV) {
         const ico = n.icon ? iconSpan(n.icon, "nav-ico") : el("span", { class: "nav-ico" }, el("span", { class: "avatar sm nav-avatar", "aria-hidden": "true" }));
+        const dot = n.tab === "profile" || n.tab === "kocsma" ? el("span", { class: "nav-dot", hidden: true, "aria-hidden": "true" }) : null;
         inner.append(el("button", { type: "button", class: "nav-btn" + (n.center ? " center" : ""), "data-tab": n.tab, onclick: () => setTab(n.tab) },
-          ico, el("span", { class: "nav-text", text: n.text })));
+          ico, el("span", { class: "nav-text", text: n.text }), dot));
       }
       nav.append(inner);
     }
@@ -1371,8 +2013,11 @@
   function renderChrome() {
     buildChrome();
     const ready = S.phase === "ready";
+    const inChat = ready && S.tab === "kocsma" && S.kScreen === "chat" && !!activeK();
     document.body.classList.toggle("has-nav", ready);
     document.body.classList.toggle("has-gamefab", ready && S.tab === "games");
+    document.body.classList.toggle("in-chat", inChat);
+    if (!inChat) document.body.classList.remove("chat-typing");
     const nav = $("#nav");
     if (nav) {
       nav.hidden = !ready;
@@ -1386,15 +2031,26 @@
         av.style.background = bg;
         av.style.color = inkOn(bg);
       }
+      // Jelzőpötty: új barátkérés (Profil), meghívó vagy olvasatlan üzenet (Kocsma).
+      const dots = { profile: ready ? S.reqIn.size : 0, kocsma: ready ? pendingInvites().length + unreadCount() : 0 };
+      for (const [tab, n] of Object.entries(dots)) {
+        const b = nav.querySelector('.nav-btn[data-tab="' + tab + '"]');
+        const d = b && b.querySelector(".nav-dot");
+        if (!d) continue;
+        d.hidden = !n;
+        const base = tab === "profile" ? "Profil" : "Kocsma";
+        b.setAttribute("aria-label", n ? base + (tab === "profile" ? ", új barátkérés" : ", újdonság") : base);
+      }
     }
     const fab = $("#fab");
-    if (fab) fab.hidden = !ready || S.readOnly;
+    if (fab) fab.hidden = !ready || S.readOnly || inChat;
     const gfab = $("#gameFab");
     if (gfab) gfab.hidden = !(ready && S.tab === "games");
   }
   function setTab(t) {
     if (!TABS.includes(t)) return;
-    if (S.tab === t && t === "kocsma") { S.partyOpen = null; S.person = null; }
+    if (S.tab === t && t === "kocsma") { S.partyOpen = null; S.person = null; S.kUser = null; S.kScreen = null; }
+    if (S.tab === t && t === "profile") S.profUser = null;
     S.tab = t;
     S.chartTip = null;
     closeSheet();
@@ -1427,6 +2083,14 @@
         updateGames();
         return;
       }
+      // A chatben a beviteli mező megmarad, csak az üzenetek frissülnek.
+      if (S.tab === "kocsma" && S.kScreen === "chat" && activeK()) {
+        const cs = screen + ":chat:" + S.kocsma;
+        if (main.dataset.screen !== cs) { main.dataset.screen = cs; main.replaceChildren(chatView()); }
+        updateChat();
+        return;
+      }
+      if (S.kScreen === "chat" && !activeK()) S.kScreen = null;
       const y = window.scrollY;
       main.dataset.screen = screen;
       main.replaceChildren(tabView());
@@ -1520,19 +2184,28 @@
       wrap.append(backBtn(partyName(S.party), closePerson), personView(S.person));
       return wrap;
     }
+    const k = activeK();
+    if (S.kUser) {
+      wrap.append(backBtn(k ? k.name : "Kocsma", () => { S.kUser = null; renderAll(); window.scrollTo(0, 0); }), userView(S.kUser));
+      return wrap;
+    }
     const ib = installBanner();
     if (ib) wrap.append(ib);
+    const inv = invitesCard();
+    if (inv) wrap.append(inv);
+    if (k) wrap.append(kocsmaHead(k));
     wrap.append(todayBar());
+    const kp = k ? kPartyBanner(k) : null;
+    if (kp) wrap.append(kp);
+    const tp = S.daysLoaded ? todayParty() : null;
     if (!S.daysLoaded) wrap.append(el("p", { class: "muted", text: "Betöltés…" }));
-    else {
-      const tp = todayParty();
-      wrap.append(tp ? partyView(tp, true) : noPartyCard());
-    }
+    else if (tp) wrap.append(partyView(tp, true));
+    if (k) wrap.append(monthRanking());
+    if (S.daysLoaded && !tp) wrap.append(noPartyCard());
+    if (!k) wrap.append(kocsmaIntro());
     wrap.append(pastParties());
     const g = groupStats();
     wrap.append(statsSection("Mindenki együtt", g.year, g.total, "Mindenki napi naplójából összeadva, aki valaha használta az appot."));
-    wrap.append(el("p", { class: "note soon-note" }, el("strong", { text: "Hamarosan: kocsmák. " }),
-      "Állandó baráti társaság közös chattel, havi ranglistával és a hónap ivójával."));
     return wrap;
   }
   function weekday(key) {
@@ -1797,10 +2470,625 @@
   }
   function myDayCounts() { const o = {}; for (const [k, d] of S.days) o[k] = dayCounts(d); return o; }
 
+  /* ---------- Kocsma fül: a kocsma ---------- */
+  function kocsmaHead(k) {
+    const n = S.kMembersLoaded ? S.kMembers.size : null;
+    const unread = unreadCount();
+    const multi = S.kocsmak.size > 1;
+    const sec = el("section", { class: "khead" });
+    sec.append(el("button", { type: "button", class: "khead-main", "aria-label": "Kocsma: " + k.name + (n == null ? "" : ", " + n + " tag") + ". Kocsmák váltása, új kocsma",
+      onclick: () => openSheet({ type: "kList" }) },
+      kIcon(k.icon, "lg"),
+      el("span", { class: "kh-text", "aria-hidden": "true" },
+        el("span", { class: "eyebrow", text: "Kocsma" }),
+        el("span", { class: "kh-name cond", text: k.name }),
+        el("span", { class: "kh-sub", text: (n == null ? "Betöltés…" : n + " tag") + (multi ? " · " + S.kocsmak.size + " kocsmád van" : "") })),
+      iconSpan(ICON_SWAP, "kh-chev")));
+    const btn = (text, ico, fn, aria, badge) => el("button", { type: "button", class: "kbtn", "aria-label": aria || text, onclick: fn },
+      iconSpan(ico, "kb-ico"), el("span", { class: "kb-text", text }),
+      badge ? el("span", { class: "kb-badge", "aria-hidden": "true", text: badge > 9 ? "9+" : String(badge) }) : null);
+    sec.append(el("div", { class: "kbtns" },
+      btn("Chat", ICON_CHAT, openChat, unread ? "Chat, " + unread + " új üzenet" : "Chat", unread),
+      btn("Buli", ICON_PARTY, kPartyAction, "Kocsmás buli"),
+      btn("Meghívás", ICON_INVITE, () => openSheet({ type: "kInvite" })),
+      btn("Kezelés", ICON_GEAR, () => openSheet({ type: "kSet" }), "A kocsma kezelése és a tagok")));
+    return sec;
+  }
+  function kPartyBanner(k) {
+    const p = kPartyToday(k);
+    if (!p || todayParty() === p.code) return null;
+    fetchPartyNames([p.code]);
+    return el("section", { class: "card kparty" },
+      el("p", { class: "eyebrow", text: "Ma kocsmás buli van" }),
+      el("h3", { class: "feed-title cond", text: partyName(p.code) }),
+      el("p", { class: "muted", text: (p.by ? "Indította: " + userName(p.by) + ". " : "") + "Ha csatlakozol, a mai napod ehhez a bulihoz kerül." }),
+      el("button", { type: "button", class: "btn wide", disabled: !canEdit(), onclick: () => joinKParty(k) }, "Csatlakozom"));
+  }
+  function monthRanking() {
+    const ym = S.kMonth || curMonth();
+    const cur = curMonth();
+    const sec = el("section", { class: "kmonth" });
+    sec.append(el("h3", { class: "feed-title cond", text: "Havi ranglista" }),
+      el("div", { class: "month-nav" },
+        el("button", { type: "button", class: "icon-btn sm", "aria-label": "Előző hónap", onclick: () => { S.kMonth = shiftMonth(ym, -1); renderAll(); } }, iconSpan(ICON_BACK)),
+        el("span", { class: "month-lbl", "aria-live": "polite", text: monthLabel(ym) }),
+        el("button", { type: "button", class: "icon-btn sm", "aria-label": "Következő hónap", disabled: ym >= cur,
+          onclick: () => { const n = shiftMonth(ym, 1); S.kMonth = n >= cur ? null : n; renderAll(); } }, iconSpan(ICON_NEXT))));
+    if (S.statsError) { sec.append(banner(RULES_MSG)); return sec; }
+    if (!S.kMembersLoaded) { sec.append(el("p", { class: "muted", text: "Betöltés…" })); return sec; }
+    const rows = monthRows(ym);
+    const ol = el("ol", { class: "rank-list" });
+    for (const r of rows) {
+      const me = r.uid === S.myId;
+      const nm = userName(r.uid);
+      const counts = CATS.map(c => c.emoji + " " + r.c[c.id]).join("   ");
+      ol.append(el("li", {}, el("button", { type: "button", class: "rank-row" + (r.rank === 1 && r.pts > 0 ? " first-place" : ""),
+        "aria-label": r.rank + ". hely: " + nm + (me ? " (te)" : "") + ", " + fmtPts(r.pts) + " pont. Profil",
+        onclick: () => { S.kUser = r.uid; renderAll(); window.scrollTo(0, 0); } },
+        el("span", { class: "rank-no cond", "aria-hidden": "true", text: r.rank + "." }),
+        avatar(r.uid, nm),
+        el("span", { class: "p-main", "aria-hidden": "true" },
+          el("span", { class: "p-name", text: nm + (me ? " (te)" : "") }),
+          el("span", { class: "p-sub", text: counts })),
+        el("span", { class: "rank-pts", "aria-hidden": "true" },
+          el("span", { class: "cond", text: fmtPts(r.pts) }),
+          el("span", { class: "rank-unit", text: "pont" })))));
+    }
+    sec.append(ol);
+    sec.append(el("p", { class: "rules-note", text: "Pontozás: rövid +5, bor +3, sör +2, víz vagy üdítő +0,25, a hónap minden napjából (bulival vagy anélkül). A hányás itt nem számít bele." }));
+    return sec;
+  }
+  function kocsmaIntro() {
+    if (kLoading()) return el("p", { class: "muted kintro-wait", text: "A kocsmáid betöltése…" });
+    return el("section", { class: "card kintro" },
+      el("h3", { class: "feed-title cond", text: "Kocsma" }),
+      el("p", { class: "muted", text: "Állandó baráti társaság: közös chat, havi ranglista, és egy gombbal indítható kocsmás buli. Egyszerre több kocsmának is tagja lehetsz." }),
+      el("div", { class: "btn-row" },
+        el("button", { type: "button", class: "btn", disabled: !canEdit(), onclick: () => openSheet({ type: "kNew" }) }, "Kocsma alapítása"),
+        el("button", { type: "button", class: "btn secondary", disabled: !canEdit(), onclick: () => openSheet({ type: "kJoin" }) }, "Belépés kocsmába")));
+  }
+  function invitesCard() {
+    // Ha már tagja vagyok, a meghívó magától eltűnik.
+    for (const [fid, f] of S.friends) if (f.invite && S.kocsmak.has(f.invite.kid)) dismissInvite(fid, true);
+    const list = pendingInvites();
+    if (!list.length) return null;
+    const sec = el("section", { class: "card invites" }, el("h3", { class: "feed-title cond", text: list.length > 1 ? "Meghívók" : "Meghívó" }));
+    for (const [fid, f] of list) {
+      const inv = f.invite;
+      sec.append(el("div", { class: "invite-row" },
+        kIcon(inv.icon, "md"),
+        el("span", { class: "ir-text" },
+          el("span", { class: "ir-name", text: inv.name }),
+          el("span", { class: "ir-sub", text: userName(fid) + " meghívott a kocsmájába." })),
+        el("button", { type: "button", class: "btn small", onclick: () => openSheet({ type: "kJoin", code: inv.code, from: fid }) }, "Megnézem"),
+        el("button", { type: "button", class: "del", "aria-label": inv.name + ": meghívó elutasítása", onclick: () => dismissInvite(fid) }, "×")));
+    }
+    return sec;
+  }
+
+  /* ---------- egy felhasználó profilja (barátok, kocsma) ---------- */
+  function relationText(uid) {
+    const parts = [];
+    if (S.friends.has(uid)) parts.push("A barátod.");
+    else if (S.reqIn.has(uid)) parts.push("Barátnak jelölt téged.");
+    else if (S.reqOut.has(uid)) parts.push("Barátnak jelölted, válaszra vár.");
+    const k = activeK();
+    if (k && S.kMembers.has(uid)) parts.push("A(z) „" + k.name + "” kocsma " + (k.owner === uid ? "alapítója." : "tagja."));
+    return parts.join(" ");
+  }
+  function friendBox(uid) {
+    const box = el("div", { class: "friend-box" });
+    const nm = userName(uid);
+    if (S.socialError) { box.append(banner(RULES_MSG)); return box; }
+    if (S.friends.has(uid)) {
+      const list = kocsmaList().filter(([kid]) => !(kid === S.kocsma && S.kMembers.has(uid)));
+      if (list.length) {
+        box.append(el("button", { type: "button", class: "btn wide", disabled: !canEdit(), onclick: () => inviteFriend(uid) },
+          list.length === 1 ? "Meghívás ide: " + list[0][1].name : "Meghívás a kocsmámba"));
+      }
+      box.append(el("button", { type: "button", class: "link-btn",
+        onclick: () => confirmSheet(nm + " kikerül a barátaid közül, és te is az övéi közül.", "Törlöm", () => removeFriend(uid)) }, "Barát törlése"));
+    } else if (S.reqIn.has(uid)) {
+      box.append(el("div", { class: "btn-row" },
+        el("button", { type: "button", class: "btn", disabled: !canEdit(), onclick: () => acceptFriend(uid) }, "Elfogadom"),
+        el("button", { type: "button", class: "btn secondary", onclick: () => declineFriend(uid) }, "Elutasítom")));
+    } else if (S.reqOut.has(uid)) {
+      box.append(el("button", { type: "button", class: "btn secondary wide", onclick: () => cancelFriendRequest(uid) }, "Barátkérés visszavonása"));
+    } else {
+      box.append(el("button", { type: "button", class: "btn wide", disabled: !canEdit(), onclick: () => sendFriendRequest(uid) }, "Barátnak jelölöm"));
+    }
+    return box;
+  }
+  function userView(uid) {
+    const sec = el("section", { class: "person user" });
+    const mine = uid === S.myId;
+    const name = userName(uid);
+    const st = statsOf(uid);
+    const rel = mine ? "" : relationText(uid);
+    sec.append(el("div", { class: "p-head" },
+      avatar(uid, name, "lg"),
+      el("div", { class: "p-head-text" },
+        el("h2", { class: "cond", text: name + (mine ? " (te)" : "") }),
+        rel ? el("p", { text: rel }) : null)));
+    if (!mine) sec.append(friendBox(uid));
+    const k = activeK();
+    if (k && S.kMembers.has(uid)) {
+      const c = monthCounts(uid, curMonth());
+      sec.append(el("p", { class: "user-month" }, el("span", { class: "score-num cond", text: fmtPts(countsPts(c)) }),
+        " pont ebben a hónapban (" + monthLabel(curMonth()) + ")"));
+    }
+    sec.append(statsSection(mine ? "Az én statisztikám" : "Statisztikája", st.years[thisYear()] || emptyCounts(), st.total,
+      mine ? "Minden napodból összeadva, bulival vagy anélkül." : "Minden napjából összeadva, bulival vagy anélkül."));
+    sec.append(el("section", { class: "stats" },
+      el("h3", { class: "feed-title cond", text: "Fogyasztás naponta" }),
+      S.statsError && !mine ? banner(RULES_MSG) : chartView("u:" + uid, mine ? { days: myDayCounts() } : st),
+      el("p", { class: "stat-note", text: "Egy oszlop egy nap: hajnali 6-tól másnap hajnali 6-ig. Koppints egy színre a részletekért." })));
+    return sec;
+  }
+
+  /* ---------- Profil fül: barátok ---------- */
+  function personRow(uid, sub, onOpen, ...actions) {
+    const nm = userName(uid);
+    return el("li", { class: "f-item" },
+      el("button", { type: "button", class: "f-open", onclick: onOpen, "aria-label": nm + (sub ? ", " + sub : "") + ". Profil" },
+        avatar(uid, nm),
+        el("span", { class: "p-main", "aria-hidden": "true" },
+          el("span", { class: "p-name", text: nm }),
+          sub ? el("span", { class: "p-sub", text: sub }) : null)),
+      ...actions);
+  }
+  function openProfUser(uid) { S.profUser = uid; renderAll(); window.scrollTo(0, 0); }
+  function friendsSection() {
+    const sec = el("section", { class: "friends" });
+    sec.append(el("div", { class: "sec-head" },
+      el("h3", { class: "feed-title cond", text: "Barátaim" }),
+      el("button", { type: "button", class: "btn secondary small", disabled: !canEdit() || S.socialError, onclick: () => openSheet({ type: "fAdd" }) }, "Barát hozzáadása")));
+    if (S.socialError) { sec.append(banner(RULES_MSG)); return sec; }
+    const incoming = [...S.reqIn.keys()].sort((a, b) => S.reqIn.get(b).at - S.reqIn.get(a).at);
+    if (incoming.length) {
+      sec.append(el("h4", { class: "f-sub", text: "Barátkérések" }));
+      sec.append(el("ul", { class: "f-list" }, ...incoming.map(uid => personRow(uid, "barátnak jelölt", () => openProfUser(uid),
+        el("button", { type: "button", class: "btn small", disabled: !canEdit(), onclick: () => acceptFriend(uid) }, "Elfogadom"),
+        el("button", { type: "button", class: "del", "aria-label": userName(uid) + ": barátkérés elutasítása", onclick: () => declineFriend(uid) }, "×")))));
+    }
+    const fr = [...S.friends.keys()].sort(byName);
+    if (!S.friendsLoaded) sec.append(el("p", { class: "muted", text: "Betöltés…" }));
+    else if (!fr.length) sec.append(el("p", { class: "muted", text: "Még nincs barátod. A „Barát hozzáadása” gombbal jelölhetsz valakit a felhasználóneve alapján; ha elfogadja, meghívhatod a kocsmádba." }));
+    else sec.append(el("ul", { class: "f-list" }, ...fr.map(uid => personRow(uid, "", () => openProfUser(uid), iconSpan(ICON_NEXT, "dr-chev")))));
+    const outgoing = [...S.reqOut.keys()].sort(byName);
+    if (outgoing.length) {
+      sec.append(el("h4", { class: "f-sub", text: "Elküldött jelölések" }));
+      sec.append(el("ul", { class: "f-list" }, ...outgoing.map(uid => personRow(uid, "válaszra vár", () => openProfUser(uid),
+        el("button", { type: "button", class: "btn secondary small", onclick: () => cancelFriendRequest(uid) }, "Visszavonás")))));
+    }
+    return sec;
+  }
+
+  /* ---------- kocsma chat ---------- */
+  function openChat() {
+    if (!S.kocsma) return;
+    S.kScreen = "chat";
+    S.kUser = null;
+    S.chatScrollDown = true;
+    markRead();
+    renderAll();
+  }
+  function closeChat() { S.kScreen = null; renderAll(); window.scrollTo(0, 0); }
+  function autoGrow(t) { t.style.height = "auto"; t.style.height = Math.min(140, t.scrollHeight + 2) + "px"; }
+  function chatView() {
+    const k = activeK();
+    const sec = el("section", { class: "view chat" });
+    sec.append(el("div", { class: "chat-top" },
+      backBtn(k ? k.name : "Kocsma", closeChat),
+      el("p", { class: "muted small chat-note", text: "Csak a kocsma tagjai látják. A saját üzenetedet rákoppintva törölheted." })));
+    sec.append(el("div", { id: "chatList", class: "chat-list" }));
+    const input = el("textarea", { id: "chatInput", class: "field chat-input", rows: 1, maxlength: MSG_MAX, placeholder: "Üzenet a kocsmának…",
+      "aria-label": "Üzenet a kocsmának", enterkeyhint: "send", autocomplete: "off" });
+    const send = el("button", { type: "button", class: "btn chat-send" }, "Küldés");
+    const go = () => sendMsg(input);
+    send.addEventListener("click", go);
+    // A Küldés gomb ne vegye el a fókuszt (különben a billentyűzet bezárul, és a gomb elmozdulna a koppintás alatt).
+    send.addEventListener("pointerdown", (e) => { if (document.activeElement === input) e.preventDefault(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(); } });
+    input.addEventListener("input", () => autoGrow(input));
+    // Gépelés közben az alsó sáv eltűnik, és a mező a billentyűzet fölé kerül.
+    input.addEventListener("focus", () => { document.body.classList.add("chat-typing"); updateKb(); });
+    input.addEventListener("blur", () => { document.body.classList.remove("chat-typing"); updateKb(); });
+    sec.append(el("div", { class: "composer" }, input, send));
+    return sec;
+  }
+  // A képernyő-billentyűzet magassága (iOS: a látható terület kisebb, mint az ablak); a beviteli sáv ennyivel feljebb kerül.
+  function updateKb() {
+    const vv = window.visualViewport;
+    const kb = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+    document.body.style.setProperty("--kb", kb + "px");
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", updateKb);
+    window.visualViewport.addEventListener("scroll", updateKb);
+  }
+  function chatDayLabel(t) {
+    const d = new Date(t);
+    const now = new Date();
+    const same = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const y = new Date(now); y.setDate(now.getDate() - 1);
+    if (same(d, now)) return "Ma";
+    if (same(d, y)) return "Tegnap";
+    try { return d.toLocaleDateString("hu-HU", { month: "long", day: "numeric", weekday: "long" }); } catch (e) { return ""; }
+  }
+  function msgRow(m, grouped) {
+    const mine = m.uid === S.myId;
+    const name = userName(m.uid);
+    const canDel = canEdit() && (mine || isKFounder() || ownerUnlocked());
+    let time = "";
+    try { time = new Date(m.at).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" }); } catch (e) {}
+    const parts = [
+      !mine && !grouped ? el("span", { class: "b-name", text: name }) : null,
+      el("span", { class: "b-text", text: m.text }),
+      el("span", { class: "b-time", text: time }),
+    ];
+    const bubble = canDel
+      ? el("button", { type: "button", class: "bubble", "aria-label": (mine ? "Te" : name) + ", " + time + ": " + m.text + ". Törlés", onclick: () => askDeleteMsg(m) }, ...parts)
+      : el("div", { class: "bubble" }, ...parts);
+    return el("div", { class: "msg" + (mine ? " mine" : "") + (grouped ? " grouped" : "") },
+      mine ? null : (grouped ? el("span", { class: "msg-gap", "aria-hidden": "true" }) : avatar(m.uid, name, "sm")),
+      bubble);
+  }
+  function updateChat() {
+    const list = document.getElementById("chatList");
+    if (!list) return;
+    const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+    const out = [];
+    if (S.kMsgsError) out.push(banner(RULES_MSG));
+    if (!S.kMsgsLoaded) out.push(el("p", { class: "muted", text: "Betöltés…" }));
+    else {
+      if (!S.kMsgsFull) out.push(el("button", { type: "button", class: "link-btn chat-more", onclick: moreMsgs }, "Korábbi üzenetek"));
+      if (!S.kMsgs.length) out.push(el("p", { class: "muted chat-empty", text: "Még nincs üzenet. Írj elsőként!" }));
+      let lastDay = "", lastUid = "", lastAt = 0;
+      for (const m of S.kMsgs) {
+        const dk = keyOf(new Date(m.at));
+        if (dk !== lastDay) { out.push(el("p", { class: "chat-day", text: chatDayLabel(m.at) })); lastDay = dk; lastUid = ""; }
+        const grouped = m.uid === lastUid && m.at - lastAt < 5 * 60 * 1000;
+        out.push(msgRow(m, grouped));
+        lastUid = m.uid;
+        lastAt = m.at;
+      }
+    }
+    const first = !list.dataset.filled && S.kMsgsLoaded;
+    list.replaceChildren(...out);
+    if (S.kMsgsLoaded) list.dataset.filled = "1";
+    if (first || atBottom || S.chatScrollDown) {
+      if (S.kMsgsLoaded) S.chatScrollDown = false;
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    }
+  }
+  function sendMsg(input) {
+    // Karakterenként (nem UTF-16 egységenként) vágunk, hogy egy emoji se törjön ketté.
+    const text = Array.from(cleanText(input.value, MSG_MAX * 2)).slice(0, MSG_MAX).join("").trim();
+    const kid = S.kocsma;
+    if (!text || !kid || !canEdit() || typeof S.backend.sendKMessage !== "function") return;
+    input.value = "";
+    autoGrow(input);
+    S.chatScrollDown = true;
+    try {
+      const r = S.backend.sendKMessage(kid, text);
+      Promise.resolve(r.done).catch((e) => {
+        console.error(e);
+        if (!input.value) input.value = text;
+        toast(errCode(e) === "permission-denied" ? "Az üzenetet a szerver nem engedte (lehet, hogy már nem vagy tagja)." : "Az üzenetet nem sikerült elküldeni. Nézd meg a netet.");
+      });
+    } catch (e) { input.value = text; toast("Az üzenetet nem sikerült elküldeni."); }
+    try { input.focus({ preventScroll: true }); } catch (e) {}
+  }
+  function askDeleteMsg(m) {
+    const kid = S.kocsma;
+    const mine = m.uid === S.myId;
+    const short = m.text.length > 80 ? m.text.slice(0, 80) + "…" : m.text;
+    confirmSheet((mine ? "Törlöd ezt az üzenetedet? " : "Törlöd " + userName(m.uid) + " üzenetét? ") + "„" + short + "”", "Törlöm", () => {
+      if (!mine && !isKFounder() && ownerUnlocked()) {
+        ownerAction(() => S.backend.adminDeleteKMessage(kid, m.id, (activeK() ? activeK().name + ": " : "") + userName(m.uid) + ": " + short), "Üzenet törölve.");
+        return;
+      }
+      Promise.resolve().then(() => S.backend.deleteKMessage(kid, m.id)).then(() => toast("Üzenet törölve."))
+        .catch((e) => { console.error(e); toast(kErrorText(e)); });
+    });
+  }
+
+  /* ---------- kocsma lapok ---------- */
+  function iconPicker(current, onPick) {
+    const grid = el("div", { class: "icon-grid", role: "radiogroup", "aria-label": "Profilkép" });
+    for (const ic of KICONS) {
+      const b = el("button", { type: "button", class: "icon-pick", role: "radio", "aria-checked": ic.id === current ? "true" : "false", "aria-label": ic.name, "data-icon": ic.id,
+        onclick: () => {
+          for (const x of grid.children) x.setAttribute("aria-checked", x === b ? "true" : "false");
+          onPick(ic.id);
+        } }, kIcon(ic.id, "md"));
+      grid.append(b);
+    }
+    return grid;
+  }
+  function kListBody() {
+    const wrap = el("div", { class: "settings" });
+    const list = kocsmaList();
+    if (list.length) {
+      const ul = el("ul", { class: "k-list" });
+      for (const [kid, k] of list) {
+        const on = kid === S.kocsma;
+        ul.append(el("li", {}, el("button", { type: "button", class: "k-row" + (on ? " on" : ""), "aria-current": on ? "true" : null,
+          onclick: () => openKocsmaTab(kid) },
+          kIcon(k.icon, "md"),
+          el("span", { class: "k-name", text: k.name }),
+          on ? el("span", { class: "k-on", text: "most ez" }) : iconSpan(ICON_NEXT, "dr-chev"))));
+      }
+      wrap.append(ul);
+    } else {
+      wrap.append(el("p", { class: "muted", text: "Még nem vagy egy kocsmának sem a tagja." }));
+    }
+    wrap.append(el("div", { class: "btn-row" },
+      el("button", { type: "button", class: "btn", disabled: !canEdit(), onclick: () => openSheet({ type: "kNew", back: { type: "kList" } }) }, "Új kocsma"),
+      el("button", { type: "button", class: "btn secondary", disabled: !canEdit(), onclick: () => openSheet({ type: "kJoin", back: { type: "kList" } }) }, "Belépés kocsmába")));
+    return wrap;
+  }
+  function kNewBody() {
+    const wrap = el("div", { class: "stack" });
+    const name = el("input", { id: "kName", class: "field", type: "text", maxlength: KNAME_MAX, autocomplete: "off", enterkeyhint: "done", placeholder: "pl. Sárga Rózsa" });
+    let icon = KICONS[Math.floor(Math.random() * KICONS.length)].id;
+    const msg = el("p", { class: "msg", role: "status" });
+    const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
+    const btn = el("button", { type: "button", class: "btn wide" }, "Kocsma alapítása");
+    btn.addEventListener("click", () => createKocsma(name.value, icon, say, btn));
+    name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); name.blur(); } });
+    wrap.append(el("label", { class: "lbl", for: "kName", text: "A kocsma neve" }), name,
+      el("span", { class: "lbl", text: "Profilkép" }), iconPicker(icon, (id) => { icon = id; }),
+      el("p", { class: "hint", text: "Te leszel az alapító: átnevezheted, tagot eltávolíthatsz, új meghívókódot kérhetsz, és törölheted. Később bármikor módosíthatod a nevét és a képét." }),
+      btn, msg);
+    return wrap;
+  }
+  function kJoinBody(s) {
+    const wrap = el("div", { class: "stack" });
+    const input = el("input", { id: "kCode", class: "field big", type: "text", maxlength: 120, autocomplete: "off", autocapitalize: "none",
+      spellcheck: "false", enterkeyhint: "go", placeholder: "pl. k7m2p9qa" });
+    if (s.code) input.value = s.code;
+    const prev = el("div", { class: "k-preview", "aria-live": "polite" });
+    const msg = el("p", { class: "msg", role: "status" });
+    const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
+    const lookBtn = el("button", { type: "button", class: "btn secondary wide" }, "Megnézem");
+    let asked = "";
+    const look = async () => {
+      const code = cleanKCode(input.value);
+      if (!code) { asked = ""; prev.replaceChildren(); say(input.value.trim() ? "A meghívókód 8 betűből és számból áll." : "", !!input.value.trim()); return; }
+      if (code === asked) return;
+      asked = code;
+      say("");
+      prev.replaceChildren(el("p", { class: "muted", text: "Keresés…" }));
+      let d = null;
+      try { d = await S.backend.getKCode(code); }
+      catch (e) { asked = ""; prev.replaceChildren(); say(errCode(e) === "permission-denied" ? RULES_MSG : "Nem érem el a szervert. Nézd meg a netet.", true); return; }
+      if (cleanKCode(input.value) !== code) return;
+      if (!d || typeof d.kid !== "string") {
+        prev.replaceChildren();
+        say("Nincs ilyen meghívókód. Lehet, hogy elírtad, vagy az alapító közben újat kért.", true);
+        return;
+      }
+      const pv = { name: cleanKName(d.name) || "Kocsma", icon: KICON_BY_ID[d.icon] ? d.icon : "01" };
+      const uids = Object.keys(d.m && typeof d.m === "object" ? d.m : {}).filter(u => S.stats.has(u) || u === S.myId).sort(byName);
+      const member = S.kocsmak.has(d.kid);
+      const join = el("button", { type: "button", class: "btn wide" }, member ? "Megnyitom" : "Belépek");
+      join.addEventListener("click", () => joinKocsma(d.kid, code, pv, s.from || null, say, join));
+      prev.replaceChildren(el("div", { class: "card k-prev" },
+        el("div", { class: "kp-head" }, kIcon(pv.icon, "lg"),
+          el("span", { class: "kp-text" }, el("span", { class: "kh-name cond", text: pv.name }), el("span", { class: "kh-sub", text: uids.length + " tag" }))),
+        uids.length ? el("ul", { class: "kp-members" }, ...uids.map(u => el("li", {}, avatar(u, userName(u), "sm"), el("span", { text: userName(u) })))) : null,
+        member ? el("p", { class: "note small", text: "Már tagja vagy ennek a kocsmának." }) : null,
+        join));
+    };
+    lookBtn.addEventListener("click", look);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); look(); } });
+    let t = null;
+    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { if (cleanKCode(input.value)) look(); }, 400); });
+    wrap.append(el("p", { class: "muted", text: s.from ? userName(s.from) + " meghívott egy kocsmába. Nézd meg, és ha szeretnéd, lépj be." : "Írd be a meghívókódot, vagy másold be a meghívó linket. Belépés előtt látod a kocsma nevét és a tagjait." }),
+      el("label", { class: "lbl", for: "kCode", text: "Meghívókód" }), input, lookBtn, prev, msg);
+    if (cleanKCode(input.value)) setTimeout(look, 0);
+    return wrap;
+  }
+  function kSetBody() {
+    const wrap = el("div", { class: "settings" });
+    const kid = S.kocsma;
+    const k = activeK();
+    if (!k) { wrap.append(el("p", { class: "muted", text: "Nincs kiválasztott kocsma." })); return wrap; }
+    const founder = k.owner === S.myId;
+    wrap.append(el("div", { class: "kp-head" }, kIcon(k.icon, "lg"),
+      el("span", { class: "kp-text" }, el("span", { class: "kh-name cond", text: k.name }),
+        el("span", { class: "kh-sub", text: (k.owner ? "Alapító: " + userName(k.owner) : "") + (k.createdAt ? ", " + fmtDate(k.createdAt) : "") }))));
+    if (founder) {
+      const name = el("input", { id: "kRename", class: "field", type: "text", maxlength: KNAME_MAX, autocomplete: "off", enterkeyhint: "done" });
+      name.value = k.name;
+      const save = el("button", { type: "button", class: "btn" }, "Mentés");
+      const doSave = () => {
+        const n = cleanKName(name.value);
+        if (!n) { toast("Adj nevet a kocsmának."); return; }
+        if (n === k.name) { name.blur(); return; }
+        updateKocsma(kid, { name: n });
+      };
+      save.addEventListener("click", doSave);
+      name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSave(); } });
+      wrap.append(el("h3", { class: "settings-sub cond", text: "Név és profilkép" }),
+        el("div", {}, el("label", { class: "lbl", for: "kRename", text: "A kocsma neve" }), el("div", { class: "add-inline" }, name, save)),
+        iconPicker(k.icon, (id) => updateKocsma(kid, { icon: id })));
+    }
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Meghívókód" }),
+      el("p", {}, el("span", { class: "code big-code", text: k.code || "…" })),
+      el("p", { class: "muted small", text: "Akinek megvan a kód (vagy a meghívó link), belépés előtt látja a kocsma nevét, képét és tagjait, és beléphet." }));
+    if (founder) {
+      wrap.append(el("button", { type: "button", class: "btn secondary wide", disabled: !canEdit(),
+        onclick: () => confirmSheet("Új meghívókód készül. A régi kód és a korábban elküldött linkek ezután nem működnek; a tagok maradnak.", "Új kódot kérek", () => newKCode(kid)) }, "Új meghívókód"));
+    }
+    const ids = [...S.kMembers.keys()].sort((a, b) => (a === k.owner ? -1 : b === k.owner ? 1 : 0) || byName(a, b));
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Tagok (" + ids.length + ")" }));
+    const ul = el("ul", { class: "f-list" });
+    for (const uid of ids) {
+      const tags = [];
+      if (uid === k.owner) tags.push("alapító");
+      if (uid === S.myId) tags.push("te");
+      const at = S.kMembers.get(uid).at;
+      const sub = tags.join(", ") + (at ? (tags.length ? " · " : "") + "belépett: " + fmtDate(at) : "");
+      ul.append(personRow(uid, sub, () => { closeSheet(); S.kUser = uid; renderAll(); window.scrollTo(0, 0); },
+        founder && uid !== S.myId ? el("button", { type: "button", class: "btn secondary small", disabled: !canEdit(),
+          onclick: () => confirmSheet(userName(uid) + " kikerül a kocsmából. Hogy a régi kóddal ne tudjon visszalépni, új meghívókód készül. Az eddigi üzenetei megmaradnak.", "Eltávolítom", () => kickMember(kid, uid)) }, "Eltávolítás") : null));
+    }
+    wrap.append(ul);
+    const others = ids.filter(u => u !== S.myId);
+    const leaveText = founder
+      ? (others.length ? "Kilépsz a(z) „" + k.name + "” kocsmából. Te vagy az alapító, ezért a kocsmát a legrégebbi tag kapja meg. Az üzeneteid megmaradnak." : "Te vagy az utolsó tag: ha kilépsz, a kocsma minden adatával (üzenetekkel együtt) törlődik.")
+      : "Kilépsz a(z) „" + k.name + "” kocsmából. Az üzeneteid megmaradnak; visszalépni csak érvényes meghívókóddal tudsz.";
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Kilépés" }),
+      el("button", { type: "button", class: "btn secondary wide", disabled: !canEdit(), onclick: () => confirmSheet(leaveText, "Kilépek", () => leaveKocsma(kid)) }, "Kilépés a kocsmából"));
+    if (founder) {
+      wrap.append(el("button", { type: "button", class: "btn danger wide", disabled: !canEdit(),
+        onclick: () => confirmSheet("A(z) „" + k.name + "” kocsma minden adatával együtt végleg törlődik: a tagság, a chat összes üzenete és a meghívókód. A tagok napi naplója és statisztikája megmarad. Ezt nem lehet visszavonni.", "Törlöm a kocsmát", () => deleteKocsma(kid)) }, "A kocsma törlése"));
+    }
+    return wrap;
+  }
+  function kInviteBody() {
+    const wrap = el("div", { class: "settings" });
+    const kid = S.kocsma;
+    const k = activeK();
+    if (!k) { wrap.append(el("p", { class: "muted", text: "Nincs kiválasztott kocsma." })); return wrap; }
+    const copy = el("button", { type: "button", class: "btn secondary" }, "Másolás");
+    copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(k.code); toast("Meghívókód kimásolva."); } catch (e) { toast("A meghívókód: " + k.code); } });
+    wrap.append(el("p", { class: "muted", text: "Küldd el a linket vagy a kódot, vagy hívd meg egy barátodat egy koppintással." }),
+      el("div", { class: "code-row" }, el("span", { class: "code big-code", text: k.code || "…" }), copy),
+      el("button", { type: "button", class: "btn wide", onclick: () => shareKInvite(k) }, "Meghívó link küldése"));
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Barátaim" }));
+    if (S.socialError) { wrap.append(banner(RULES_MSG)); return wrap; }
+    const fr = [...S.friends.keys()].filter(uid => !S.kMembers.has(uid)).sort(byName);
+    if (!S.friends.size) wrap.append(el("p", { class: "muted", text: "Még nincs barátod. A Profil fülön jelölhetsz barátot a felhasználóneve alapján." }));
+    else if (!fr.length) wrap.append(el("p", { class: "muted", text: "Minden barátod tagja már ennek a kocsmának." }));
+    else {
+      const ul = el("ul", { class: "f-list" });
+      for (const uid of fr) {
+        const b = el("button", { type: "button", class: "btn small", disabled: !canEdit() }, "Meghívom");
+        b.addEventListener("click", async () => { b.disabled = true; if (await sendKInvite(uid, kid)) b.textContent = "Meghívva"; else b.disabled = false; });
+        ul.append(personRow(uid, "", () => { closeSheet(); S.tab = "profile"; openProfUser(uid); }, b));
+      }
+      wrap.append(ul);
+    }
+    return wrap;
+  }
+  function kPickBody(s) {
+    const wrap = el("div", { class: "settings" });
+    wrap.append(el("p", { class: "muted", text: "Melyik kocsmádba hívod meg " + userName(s.uid) + " barátodat?" }));
+    const ul = el("ul", { class: "k-list" });
+    for (const [kid, k] of kocsmaList()) {
+      ul.append(el("li", {}, el("button", { type: "button", class: "k-row", onclick: async () => { if (await sendKInvite(s.uid, kid)) closeSheet(); } },
+        kIcon(k.icon, "md"), el("span", { class: "k-name", text: k.name }), iconSpan(ICON_NEXT, "dr-chev"))));
+    }
+    wrap.append(ul);
+    return wrap;
+  }
+  function fAddBody() {
+    const wrap = el("div", { class: "stack" });
+    const input = el("input", { id: "fName", class: "field big", type: "text", maxlength: 20, autocomplete: "off", autocapitalize: "none",
+      spellcheck: "false", enterkeyhint: "send", placeholder: "pl. bence" });
+    const msg = el("p", { class: "msg", role: "status" });
+    const say = (t, err) => { msg.textContent = t; msg.classList.toggle("err", !!err); };
+    const btn = el("button", { type: "button", class: "btn wide" }, "Barátnak jelölöm");
+    const go = async () => {
+      btn.disabled = true;
+      const ok = await sendFriendRequestByName(input.value, say);
+      btn.disabled = false;
+      if (ok) closeSheet();
+    };
+    btn.addEventListener("click", go);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    wrap.append(el("label", { class: "lbl", for: "fName", text: "A barátod felhasználóneve" }), input,
+      el("p", { class: "hint", text: "Ha elfogadja, egymás barátlistáján lesztek, és egy koppintással meghívhatjátok egymást a kocsmátokba." }),
+      btn, msg);
+    return wrap;
+  }
+
+  /* ---------- tulajdonos: kocsmák ---------- */
+  function ownerKocsmakBody() {
+    const wrap = el("div", { class: "settings" });
+    if (!ownerUnlocked()) {
+      wrap.append(el("p", { text: "Lejárt a feloldás." }), el("button", { type: "button", class: "btn wide", onclick: () => openSheet({ type: "owner" }) }, "Feloldás"));
+      return wrap;
+    }
+    const box = el("div", {}, el("p", { class: "muted", text: "Betöltés…" }));
+    wrap.append(el("p", { class: "muted", text: "Az összes kocsma. Egy kocsmára koppintva látod a tagjait és az utolsó üzeneteit, és törölhetsz. Minden művelet bekerül a naplóba." }), box);
+    Promise.resolve().then(() => S.backend.adminListKocsmak()).then((rows) => {
+      if (!rows.length) { box.replaceChildren(el("p", { class: "muted", text: "Még nincs kocsma." })); return; }
+      const ul = el("ul", { class: "k-list" });
+      for (const r of rows.map(x => ({ id: x.id, k: sanitizeKocsma(x.data) })).sort((a, b) => a.k.name.localeCompare(b.k.name, "hu", { sensitivity: "base" }))) {
+        ul.append(el("li", {}, el("button", { type: "button", class: "k-row", onclick: () => openSheet({ type: "ownerKocsma", kid: r.id, back: { type: "ownerKocsmak", back: { type: "owner" } } }) },
+          kIcon(r.k.icon, "md"),
+          el("span", { class: "k-name" }, el("span", { text: r.k.name }), el("span", { class: "k-sub", text: "alapító: " + userName(r.k.owner) })),
+          iconSpan(ICON_NEXT, "dr-chev"))));
+      }
+      box.replaceChildren(ul);
+    }).catch((e) => { box.replaceChildren(el("p", { class: "msg err", text: ownerErrorText(e) })); });
+    return wrap;
+  }
+  function ownerKocsmaBody(s) {
+    const wrap = el("div", { class: "settings" });
+    const kid = s.kid;
+    const back = s.back;
+    if (!ownerUnlocked()) {
+      wrap.append(el("p", { text: "Lejárt a feloldás." }), el("button", { type: "button", class: "btn wide", onclick: () => openSheet({ type: "owner" }) }, "Feloldás"));
+      return wrap;
+    }
+    const box = el("div", { class: "settings" }, el("p", { class: "muted", text: "Betöltés…" }));
+    wrap.append(box);
+    const reopen = () => openSheet({ type: "ownerKocsma", kid, back });
+    Promise.resolve().then(() => S.backend.adminKocsmaDetail(kid)).then((d) => {
+      if (!d.kocsma) { box.replaceChildren(el("p", { class: "muted", text: "Ez a kocsma már nem létezik." })); return; }
+      const k = sanitizeKocsma(d.kocsma);
+      const out = [el("div", { class: "kp-head" }, kIcon(k.icon, "lg"),
+        el("span", { class: "kp-text" }, el("span", { class: "kh-name cond", text: k.name }),
+          el("span", { class: "kh-sub", text: "Alapító: " + userName(k.owner) + " · kód: " + (k.code || "–") })))];
+      out.push(el("h3", { class: "settings-sub cond", text: "Tagok (" + d.members.length + ")" }));
+      const ul = el("ul", { class: "f-list" });
+      for (const m of d.members.slice().sort((a, b) => byName(a.id, b.id))) {
+        ul.append(el("li", { class: "f-item" },
+          el("span", { class: "f-open static" }, avatar(m.id, userName(m.id)),
+            el("span", { class: "p-main" }, el("span", { class: "p-name", text: userName(m.id) }), el("span", { class: "p-sub", text: m.id === k.owner ? "alapító" : "" }))),
+          el("button", { type: "button", class: "btn secondary small",
+            onclick: () => confirmSheet(userName(m.id) + " kikerül a(z) „" + k.name + "” kocsmából" + (m.id === k.owner ? " (az alapítói szerepet a legrégebbi tag kapja meg)" : "") + ", és új meghívókód készül.", "Eltávolítom",
+              () => ownerAction(() => S.backend.adminRemoveKMember(kid, m.id, k.name + ": " + userName(m.id)), "Eltávolítva.", reopen)) }, "Eltávolítás")));
+      }
+      out.push(ul);
+      out.push(el("h3", { class: "settings-sub cond", text: "Utolsó üzenetek" }));
+      if (!d.messages.length) out.push(el("p", { class: "muted", text: "Nincs üzenet." }));
+      const ml = el("ul", { class: "owner-msgs" });
+      for (const raw of d.messages) {
+        const m = sanitizeMsg(raw.id, raw.data);
+        if (!m) continue;
+        let when = "";
+        try { when = new Date(m.at).toLocaleString("hu-HU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch (e) {}
+        const short = m.text.length > 60 ? m.text.slice(0, 60) + "…" : m.text;
+        ml.append(el("li", {},
+          el("span", { class: "om-main" }, el("span", { class: "om-who", text: userName(m.uid) + " · " + when }), el("span", { class: "om-text", text: m.text })),
+          el("button", { type: "button", class: "del", "aria-label": "Üzenet törlése",
+            onclick: () => confirmSheet("Törlöd " + userName(m.uid) + " üzenetét? „" + short + "”", "Törlöm",
+              () => ownerAction(() => S.backend.adminDeleteKMessage(kid, m.id, k.name + ": " + userName(m.uid) + ": " + short), "Üzenet törölve.", reopen)) }, "×")));
+      }
+      out.push(ml);
+      out.push(el("button", { type: "button", class: "btn danger wide",
+        onclick: () => confirmSheet("A(z) „" + k.name + "” kocsma minden adata (tagság, üzenetek, meghívókód) véglegesen törlődik.", "Törlöm a kocsmát",
+          () => ownerAction(() => S.backend.adminDeleteKocsma(kid, k.name), "A kocsma törölve.", () => openSheet(back || { type: "owner" }))) }, "A kocsma törlése"));
+      box.replaceChildren(...out);
+    }).catch((e) => { box.replaceChildren(el("p", { class: "msg err", text: ownerErrorText(e) })); });
+    return wrap;
+  }
+
   /* ---------- Profil fül ---------- */
   function profileView() {
     const wrap = el("div", { class: "view profile" });
     for (const b of banners()) wrap.append(b);
+    if (S.profUser) {
+      wrap.append(backBtn("Profil", () => { S.profUser = null; renderAll(); window.scrollTo(0, 0); }), userView(S.profUser));
+      return wrap;
+    }
     wrap.append(el("div", { class: "prof-head" },
       avatar(S.myId, S.username, "xl"),
       el("div", { class: "prof-text" },
@@ -1814,6 +3102,7 @@
       el("p", { class: "stat-note", text: "Egy oszlop egy nap: hajnali 6-tól másnap hajnali 6-ig. Koppints egy színre a részletekért." }),
       el("p", { class: "stat-note care", text: "A számok becslések: nem mérik a véralkoholszintet, és nem alkalmasak annak eldöntésére, hogy vezethetsz-e." })));
     wrap.append(daysSection());
+    wrap.append(friendsSection());
     wrap.append(settingsSection());
     return wrap;
   }
@@ -2143,6 +3432,42 @@
         title.textContent = "Felhasználási feltételek";
         body.append(termsContent());
         break;
+      case "kList":
+        title.textContent = "Kocsmáim";
+        body.append(kListBody());
+        break;
+      case "kNew":
+        title.textContent = "Új kocsma";
+        body.append(kNewBody());
+        break;
+      case "kJoin":
+        title.textContent = sheet.from ? "Meghívó" : "Belépés kocsmába";
+        body.append(kJoinBody(sheet));
+        break;
+      case "kSet":
+        title.textContent = "A kocsma";
+        body.append(kSetBody());
+        break;
+      case "kInvite":
+        title.textContent = "Meghívás";
+        body.append(kInviteBody());
+        break;
+      case "kPick":
+        title.textContent = "Melyik kocsmába?";
+        body.append(kPickBody(sheet));
+        break;
+      case "fAdd":
+        title.textContent = "Barát hozzáadása";
+        body.append(fAddBody());
+        break;
+      case "ownerKocsmak":
+        title.textContent = "Kocsmák";
+        body.append(ownerKocsmakBody());
+        break;
+      case "ownerKocsma":
+        title.textContent = "Kocsma";
+        body.append(ownerKocsmaBody(sheet));
+        break;
       case "delete": {
         title.textContent = "Fiók törlése";
         const pw = el("input", { id: "delPw", class: "field", type: "password", maxlength: 128, autocomplete: "current-password", enterkeyhint: "done" });
@@ -2151,18 +3476,18 @@
         btn.addEventListener("click", () => doDelete(pw.value, msg, btn));
         pw.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doDelete(pw.value, msg, btn); } });
         body.append(el("div", { class: "stack" },
-          el("p", { class: "confirm-text", text: "Ezzel végleg törlöd a fiókodat, a felhasználónevedet, a statisztikádat, a napi naplódat, az ivós játékaidat, valamint a buli-összesítéseidet és a szavazataidat minden buliból. Ezt nem lehet visszavonni." }),
+          el("p", { class: "confirm-text", text: "Ezzel végleg törlöd a fiókodat, a felhasználónevedet, a statisztikádat, a napi naplódat, az ivós játékaidat, a buli-összesítéseidet és a szavazataidat minden buliból, a chat-üzeneteidet, a barátságaidat és a barátkéréseidet. A kocsmáidból kilépsz: ahol alapító vagy, a kocsmát a legrégebbi tag kapja meg; ahol te vagy az utolsó tag, a kocsma törlődik. Ezt nem lehet visszavonni." }),
           el("label", { class: "lbl", for: "delPw", text: "A jelszavad a megerősítéshez" }), pw, btn, msg,
           el("button", { type: "button", class: "btn secondary wide", onclick: closeSheet }, "Mégse")));
         break;
       }
       case "confirm":
-        title.textContent = "Biztos?";
+        title.textContent = sheet.title || "Biztos?";
         body.append(
           el("p", { class: "confirm-text", text: sheet.text }),
           el("div", { class: "btn-row" },
             el("button", { type: "button", class: "btn secondary", onclick: closeSheet }, "Mégse"),
-            el("button", { type: "button", class: "btn danger", onclick: () => { const a = sheet.action; closeSheet(); a(); } }, sheet.label)));
+            el("button", { type: "button", class: sheet.safe ? "btn" : "btn danger", onclick: () => { const a = sheet.action; closeSheet(); a(); } }, sheet.label)));
         break;
     }
     root.append(el("div", { class: "backdrop", onclick: closeSheet }), panel);
@@ -2600,7 +3925,7 @@
       el("label", { class: "check block", for: "cTerms" }, terms,
         el("span", { text: "Elolvastam és elfogadom a Felhasználási feltételeket, és tudomásul veszem, hogy az appot a saját felelősségemre használom." })),
       el("label", { class: "check block", for: "cAgree" }, agree,
-        el("span", { text: "Elolvastam az adatkezelési tájékoztatót, és kifejezetten hozzájárulok, hogy az app tárolja a napi naplómat (az általam felírt italokat), és a többi felhasználónak megmutassa a statisztikámat, a bulikon felírt italaimat, a pontjaimat és a rólam szóló szavazatokat." })));
+        el("span", { text: "Elolvastam az adatkezelési tájékoztatót, és kifejezetten hozzájárulok, hogy az app tárolja a napi naplómat (az általam felírt italokat), és a többi felhasználónak megmutassa a statisztikámat, a bulikon felírt italaimat, a pontjaimat és a rólam szóló szavazatokat, a kocsmáim tagjainak pedig a havi pontjaimat és a chat-üzeneteimet." })));
     return { box, adult, terms, agree };
   }
   function authView() {
@@ -2693,8 +4018,8 @@
   function consentView() {
     const sec = el("section", { class: "onboard" });
     sec.append(el("h2", { class: "hero cond", text: "Feltételek" }));
-    sec.append(el("p", { class: "lead", text: "Frissült az app: elkészültek a Felhasználási feltételek. Mielőtt folytatod, kérjük, olvasd el őket és az adatkezelési tájékoztatót, fogadd el a feltételeket, és járulj hozzá az adataid kezeléséhez." }));
-    sec.append(el("p", { class: "note", text: "Röviden: az app a felhasználónevedet és a napi naplódat (a felírt italaidat) tárolja. A napi naplód részleteit csak te látod; a statisztikádat, a bulikon felírt italaidat, a pontjaidat és a rólad szóló szavazatokat a többi felhasználó is látja. Nem adjuk el és nem adjuk át senkinek. A fiókodat bármikor törölheted a Profil fülön." }));
+    sec.append(el("p", { class: "lead", text: "Frissült az app: megjöttek a barátok és a kocsmák (közös chattel, havi ranglistával és kocsmás bulival). Mielőtt folytatod, kérjük, olvasd el a frissített adatkezelési tájékoztatót és a Felhasználási feltételeket, fogadd el a feltételeket, és járulj hozzá az adataid kezeléséhez." }));
+    sec.append(el("p", { class: "note", text: "Röviden: az app a felhasználónevedet és a napi naplódat (a felírt italaidat) tárolja. A napi naplód részleteit és a barátlistádat csak te látod; a statisztikádat, a bulikon felírt italaidat, a pontjaidat és a rólad szóló szavazatokat a többi felhasználó is látja, a kocsmád chatjét és tagjait pedig a kocsma tagjai. Nem adjuk el és nem adjuk át senkinek. A fiókodat bármikor törölheted a Profil fülön." }));
     const cons = consentBoxes();
     const msg = el("p", { class: "msg", role: "status" });
     const btn = el("button", { type: "button", class: "btn big wide" }, "Elfogadom és folytatom");
@@ -2721,26 +4046,30 @@
         "A bulikat, amelyekben részt veszel: a buli nevét és kódját, a buliba rendelt napjaid összesítését és a hányás-szavazatokat.",
         "Az ezekből számolt statisztikát (éves, összesített és napi) és a pontjaidat.",
         "A saját ivós játékaidat (név, létszám, eszközök, leírás), ha felveszel ilyet.",
+        "A barátaidat és a barátkéréseket (ki kit jelölt barátnak, és mikor), valamint a barátaidtól kapott kocsma-meghívókat.",
+        "A kocsmáidat: a kocsma nevét, profilképét, meghívókódját és alapítóját, a tagokat és a belépésük idejét, a kocsmás buli kódját és napját, valamint a kocsma chatjébe írt üzeneteidet (a szöveget és az időpontot).",
         "A saját italneveidet, és hogy kategóriánként melyik fajtát választottad utoljára (ezt írja fel a +1 gomb).",
         "Azoknak a buliknak a kódját, amelyekben részt vettél. Ezt csak te látod, és azért tároljuk, hogy a fiókod törlésekor minden buliból törölhessük az adataidat.",
+        "Azoknak a kocsmáknak az azonosítóját, amelyeknek tagja vagy vagy voltál. Ezt csak te látod, és azért tároljuk, hogy a fiókod törlésekor minden kocsmából törölhessük az üzeneteidet és a tagságodat.",
         "A hozzájárulásod és a Felhasználási feltételek elfogadásának időpontját.",
-        "A telefonodon, a böngésző tárhelyén a mértékegység beállítását és a korábbi bulijaid listáját."),
+        "A telefonodon, a böngésző tárhelyén a mértékegység beállítását, a korábbi bulijaid listáját, a legutóbb választott kocsmát, és hogy a chatben meddig olvastál."),
       h("Mire használjuk?"),
-      para("Kizárólag az app működéséhez: hogy a napi napló, a számlálók, a statisztika, a grafikon és a verseny működjön, és a buli résztvevői lássák egymás italait. Az e-mail-címet csak a jelszó visszaállításához és a cím megerősítéséhez használjuk. Nincs reklám, az adataidat nem adjuk el és nem adjuk át senkinek, és más célra nem használjuk."),
+      para("Kizárólag az app működéséhez: hogy a napi napló, a számlálók, a statisztika, a grafikon, a verseny, a barátok, a kocsmák, a chat és a havi ranglista működjön, és a buli résztvevői lássák egymás italait. Az e-mail-címet csak a jelszó visszaállításához és a cím megerősítéséhez használjuk. Nincs reklám, az adataidat nem adjuk el és nem adjuk át senkinek, és más célra nem használjuk."),
       h("Mi a jogalap?"),
       para("A hozzájárulásod (GDPR 6. cikk (1) bekezdés a) pont). Mivel az italfogyasztásra vonatkozó adatok egészségügyi jellegűnek is tekinthetők, ezekhez kifejezett hozzájárulást kérünk (GDPR 9. cikk (2) bekezdés a) pont). A hozzájárulásodat bármikor visszavonhatod a fiókod törlésével; ez nem érinti a korábbi adatkezelés jogszerűségét."),
       h("Ki látja az adataidat?"),
-      para("A napi naplód részleteit (hogy melyik napon pontosan mit ittál, és melyik napod melyik bulihoz tartozik), a saját italneveidet és az ivós játékaidat csak te látod."),
+      para("A napi naplód részleteit (hogy melyik napon pontosan mit ittál, és melyik napod melyik bulihoz tartozik), a saját italneveidet, az ivós játékaidat és a barátlistádat csak te látod. Egy barátkérést a küldője és a címzettje lát; ha egy barátodat meghívod egy kocsmába, ő látja a meghívót (a kocsma nevét, képét és meghívókódját)."),
       para("A többi bejelentkezett felhasználó látja a felhasználónevedet, a statisztikádat (kategóriánként: éves, összesített és napi bontásban) és a grafikonodat. Egy bulin a résztvevők látják a buliba rendelt napjaid összesítését fajtánként, a legutóbbi italaidat az időpontjukkal, a pontjaidat és a rólad szóló szavazatokat. Egy buli adatait az láthatja, akinek van fiókja és ismeri a buli kódját. Az e-mail-címedet és a jelszavadat senki más nem látja."),
+      para("Egy kocsma nevét, profilképét és tagjainak listáját az láthatja, akinek van fiókja és megvan a kocsma meghívókódja vagy meghívó linkje. A kocsma chatjét, a tagok belépési idejét, az alapítót, a meghívókódot és a kocsmás bulit csak a kocsma tagjai látják. A havi ranglistán a kocsma tagjai a havi pontjaidat és italaid számát is látják; ezek a statisztikádból számolódnak, amelyet a többi felhasználó egyébként is lát."),
       para("Adatfeldolgozó a Google (Firebase szolgáltatás). Az adatbázis európai szervereken van; a bejelentkezési adatokat a Google az EU–USA adatvédelmi keretrendszer és szerződéses garanciák alapján az Egyesült Államokban is kezelheti. Az oldal betöltésekor a GitHub (a tárhely) és a Google (betűtípusok, Firebase) a működéshez szükséges technikai adatokat, például az IP-címedet is megkapja."),
       h("A tulajdonos jogosultságai"),
-      para("Az app tulajdonosa (az adatkezelő) a visszaélések kezelése és a hibák javítása érdekében átnevezhet felhasználókat, javíthatja vagy nullázhatja a buli-számlálókat (ilyenkor a buliba rendelt napjaidat is), törölhet szavazatokat, bulikat és felhasználói adatokat, és letilthat fiókokat. Ehhez a saját fiókjával, a jelszava újbóli megadása után fér hozzá, és minden ilyen műveletet naplózunk. Ehhez a tulajdonos a bulik listáját, a hozzájárulásod időpontját és a napi naplódat is láthatja. A tulajdonos a Firebase kezelőfelületén keresztül is hozzáfér az adatokhoz."),
+      para("Az app tulajdonosa (az adatkezelő) a visszaélések kezelése és a hibák javítása érdekében átnevezhet felhasználókat, javíthatja vagy nullázhatja a buli-számlálókat (ilyenkor a buliba rendelt napjaidat is), törölhet szavazatokat, bulikat és felhasználói adatokat, és letilthat fiókokat. Ehhez a saját fiókjával, a jelszava újbóli megadása után fér hozzá, és minden ilyen műveletet naplózunk. Ugyanígy kocsmákat törölhet, tagot távolíthat el egy kocsmából, és chat-üzeneteket törölhet. Ehhez a tulajdonos a bulik és a kocsmáid listáját, a barátlistádat, a hozzájárulásod időpontját, a napi naplódat, valamint a kocsmák adatait és üzeneteit is láthatja. A tulajdonos a Firebase kezelőfelületén keresztül is hozzáfér az adatokhoz."),
       h("Meddig tároljuk?"),
-      para("Amíg a fiókod létezik. Ha törlöd a fiókodat, a profilod, a felhasználóneved, a statisztikád, a napi naplód, az ivós játékaid, valamint a buli-összesítéseid és a szavazataid minden olyan buliból azonnal törlődnek, amelyről az app tud (amelyet bármelyik eszközödön megnyitottál ezzel a fiókkal, vagy amelyhez napot rendeltél). Ha egy régebbi buliban mégis maradna adatod, például egy azóta nem használt telefonról, az adatkezelő kérésre törli. A mások által rólad leadott szavazatokban csak egy azonosító marad, ami már senkihez sem köthető. A bulik neve a bulihoz tartozik, ezért az megmarad."),
+      para("Amíg a fiókod létezik. A chat-üzeneteket addig tároljuk, amíg a szerzőjük, a kocsma alapítója vagy a tulajdonos nem törli őket, vagy amíg a kocsma meg nem szűnik; ha kilépsz egy kocsmából, az üzeneteid ott maradnak. Ha törlöd a fiókodat, a profilod, a felhasználóneved, a statisztikád, a napi naplód, az ivós játékaid, a barátságaid és a barátkéréseid, minden chat-üzeneted, valamint a buli-összesítéseid és a szavazataid minden olyan buliból azonnal törlődnek, amelyről az app tud (amelyet bármelyik eszközödön megnyitottál ezzel a fiókkal, vagy amelyhez napot rendeltél). A kocsmáidból kilépsz: ahol alapító vagy, a kocsmát a legrégebbi tag kapja meg; ahol te vagy az utolsó tag, a kocsma minden adatával törlődik. Ha egy régebbi buliban mégis maradna adatod, például egy azóta nem használt telefonról, az adatkezelő kérésre törli. A mások által rólad leadott szavazatokban csak egy azonosító marad, ami már senkihez sem köthető. A bulik neve a bulihoz tartozik, ezért az megmarad."),
       h("Milyen jogaid vannak?"),
       para("Jogod van hozzáférni az adataidhoz (ezek nagy részét az appban látod), helyesbíteni őket (a napi naplód bármelyik napja és a felhasználóneved az appban módosítható), törölni őket (Profil, Fiókom törlése), kérni az adataid másolatát, és visszavonni a hozzájárulásodat. Kérésekkel az adatkezelőhöz fordulhatsz a fenti elérhetőségen. Panaszt a Nemzeti Adatvédelmi és Információszabadság Hatóságnál tehetsz (NAIH, 1055 Budapest, Falk Miksa utca 9–11., www.naih.hu)."),
       h("Új funkciók"),
-      para("Az appba később új funkciók kerülhetnek (például barátok, kocsmák közös chattel, naptár, térkép). Ha egy új funkció új adatot kezelne, előbb frissítjük ezt a tájékoztatót, és újra kérjük a hozzájárulásodat."),
+      para("Az appba később új funkciók kerülhetnek (például naptár, térkép). Ha egy új funkció új adatot kezelne, előbb frissítjük ezt a tájékoztatót, és újra kérjük a hozzájárulásodat."),
       h("Korhatár"),
       para("Az appot csak 18. életévüket betöltött személyek használhatják."),
       h("Felhasználási feltételek"),
@@ -2764,7 +4093,7 @@
       h("4. Az app nem orvosi és nem mérőeszköz"),
       para("Az appban megjelenő mennyiségek (például egy rövid 4 cl, egy sör 5 dl) becslések, a felhasználók által beírt adatokon alapulnak, és eltérhetnek a valóságtól. Az app nem méri és nem becsüli a véralkoholszintet, nem nyújt orvosi tanácsot, és nem alkalmas annak megítélésére, hogy valaki vezethet-e, dolgozhat-e, vagy hogy egészségügyi szempontból mennyi alkohol biztonságos számára."),
       h("5. Ivós játékok és a felhasználók által beírt tartalom"),
-      para("Az ivós játékokat a felhasználók maguk írják; az üzemeltető ezeket nem ellenőrzi, nem ajánlja és nem vállal értük felelősséget. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja."),
+      para("Az ivós játékokat a felhasználók maguk írják; az üzemeltető ezeket nem ellenőrzi, nem ajánlja és nem vállal értük felelősséget. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok, kocsmák és chat-üzenetek). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja."),
       h("6. Az app „ahogy van” működik"),
       para("Az app egy baráti társaság szabadidős, ingyenes fejlesztése. Az üzemeltető nem vállal kötelezettséget és nem ad garanciát arra, hogy az app hibátlanul vagy megszakítás nélkül működik, hogy az adatok pontosak, teljesek vagy mindig elérhetők, illetve hogy nem vesznek el. Az üzemeltető az appot bármikor módosíthatja, szüneteltetheti vagy megszüntetheti. Az app külső szolgáltatásokat használ (Google Firebase, GitHub); ezek működéséért az üzemeltető nem felel."),
       h("7. A felelősség kizárása"),
@@ -2857,7 +4186,8 @@
   function ownerLogText(e) {
     const who = e.target ? displayName(e.target, S.docs.get(e.target)) : "";
     const names = { rename: "Átnevezés", ban: "Letiltás", unban: "Letiltás feloldása", wipe: "Adatok törlése", edit: "Számláló javítása",
-      reset: "Számlálók nullázása", clearvotes: "Szavazatok törlése", deleteparty: "Buli törlése" };
+      reset: "Számlálók nullázása", clearvotes: "Szavazatok törlése", deleteparty: "Buli törlése",
+      kdelete: "Kocsma törlése", kmsg: "Üzenet törlése", kkick: "Kocsmatag eltávolítása" };
     const parts = [names[e.action] || e.action];
     if (e.detail) parts.push(e.detail); else if (who) parts.push(who);
     if (e.party) parts.push("(" + e.party + ")");
@@ -2908,6 +4238,9 @@
             () => ownerAction(() => S.backend.adminDeleteParty(party, title), "A buli törölve.", () => { forgetParty(party); closeSheet(); backToToday(); })) },
           "A buli törlése"));
     }
+
+    wrap.append(el("h3", { class: "settings-sub cond", text: "Kocsmák" }),
+      el("button", { type: "button", class: "btn secondary wide", onclick: () => openSheet({ type: "ownerKocsmak", back: { type: "owner" } }) }, "Kocsmák kezelése"));
 
     wrap.append(el("h3", { class: "settings-sub cond", text: "Napló" }));
     const logBox = el("div", { class: "owner-log" }, el("p", { class: "muted", text: "Betöltés…" }));
@@ -2985,7 +4318,7 @@
             })) },
           banned ? "Letiltás feloldása" : "Letiltás"),
         el("button", { type: "button", class: "btn danger wide",
-          onclick: () => confirmSheet(name + " profilja, felhasználóneve, statisztikája, napi naplója, ivós játékai, valamint számlálói és szavazatai minden ismert buliból véglegesen törlődnek. Ha nem szeretnéd, hogy újra regisztráljon ezzel a fiókkal, előbb tiltsd le.", "Törlöm",
+          onclick: () => confirmSheet(name + " profilja, felhasználóneve, statisztikája, napi naplója, ivós játékai, számlálói és szavazatai minden ismert buliból, chat-üzenetei, barátságai és barátkérései véglegesen törlődnek, és kikerül a kocsmáiból (ahol alapító, ott a legrégebbi tag kapja meg a kocsmát). Ha nem szeretnéd, hogy újra regisztráljon ezzel a fiókkal, előbb tiltsd le.", "Törlöm",
             () => ownerAction(() => S.backend.adminWipe(uid, [...new Set([...loadParties().map(p => p.code), ...(S.party ? [S.party] : [])])], name), "Az adatai törölve.", () => openSheet({ type: "owner" }))) },
           "Összes adatának törlése"),
         el("p", { class: "muted small", text: "A belépési rekordot (a Firebase-fiókot) csak a Firebase konzolban lehet törölni: Authentication, Users, majd keresd meg a fenti fiókazonosítót." }));
@@ -3103,6 +4436,10 @@
         consentOk = consentValid(priv && priv.consent);
         S.privParties = priv && priv.parties && typeof priv.parties === "object" ? priv.parties : null;
         S.migrated = priv && Number(priv.migrated) > 0 ? Number(priv.migrated) : 0;
+        if (priv && priv.kocsmak && typeof priv.kocsmak === "object") {
+          S.privK = {};
+          for (const [kid, at] of Object.entries(priv.kocsmak)) if (KID_RE.test(kid)) S.privK[kid] = num(at) || 1;
+        }
         S.prefs = sanitizePrefs(priv && priv.drinks);
       } catch (e) {
         console.error(e);

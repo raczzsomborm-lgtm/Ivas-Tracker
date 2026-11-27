@@ -118,6 +118,177 @@ function hand(backend, problem) {
     return e;
   };
   const CAT_IDS = ["shot", "wine", "beer", "water"];
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const PARTY_RE = /^[a-z0-9-]{3,40}$/;
+  const dayRef = (uid, day) => fs.doc(db, "users", uid, "days", day);
+  const daysColl = (uid) => fs.collection(db, "users", uid, "days");
+  const gameRef = (uid, id) => fs.doc(db, "users", uid, "games", id);
+  const gamesColl = (uid) => fs.collection(db, "users", uid, "games");
+  // Barátok és kocsmák
+  const kocsmaRef = (kid) => fs.doc(db, "kocsmak", kid);
+  const kMemberRef = (kid, uid) => fs.doc(db, "kocsmak", kid, "members", uid);
+  const kMembersColl = (kid) => fs.collection(db, "kocsmak", kid, "members");
+  const kMsgColl = (kid) => fs.collection(db, "kocsmak", kid, "messages");
+  const kCodeRef = (code) => fs.doc(db, "kocsmaCodes", code);
+  const friendRef = (uid, fid) => fs.doc(db, "users", uid, "friends", fid);
+  const friendsColl = (uid) => fs.collection(db, "users", uid, "friends");
+  const reqRef = (from, to) => fs.doc(db, "friendReqs", from + "_" + to);
+  const reqColl = () => fs.collection(db, "friendReqs");
+  const KCODE_RE = /^[a-z0-9]{8}$/;
+  const objOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  function newKCode() {
+    const a = "abcdefghjkmnpqrstuvwxyz23456789";
+    const b = new Uint8Array(8);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => a[x % a.length]).join("");
+  }
+  const kLog = (action, target, kid, detail) => { const e = logEntry(action, target, null, detail); if (kid) e.kocsma = kid; return e; };
+  // Sok dokumentum törlése kötegekben. A szabályok kötegenként legfeljebb 20 get/exists hívást engednek, ezért ahol
+  // a szabály dokumentumot olvas (pl. az alapító jogát ellenőrzi), kis kötegekkel dolgozunk.
+  async function deleteRefs(refs, size) {
+    for (let i = 0; i < refs.length; i += size) {
+      const b = fs.writeBatch(db);
+      refs.slice(i, i + size).forEach((r) => b.delete(r));
+      await b.commit();
+    }
+  }
+  // Új meghívókóddal ír egy köteget; ha a véletlen kód már foglalt (ritka), újat próbál.
+  async function withNewCode(build) {
+    let last = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const code = newKCode();
+      try {
+        await build(code).commit();
+        return code;
+      } catch (e) {
+        last = e;
+        let taken = false;
+        if (e && e.code === "permission-denied") { try { taken = (await fs.getDoc(kCodeRef(code))).exists(); } catch (e2) {} }
+        if (!taken) throw e;
+      }
+    }
+    throw last;
+  }
+  // Egy kocsma teljes törlése: tagok, üzenetek, meghívókód, maga a kocsma. admin: a tulajdonos végzi (naplózva).
+  async function wipeKocsma(kid, k, admin, label) {
+    const ms = await fs.getDocs(kMembersColl(kid));
+    const others = ms.docs.filter((d) => admin || d.id !== user.uid).map((d) => d.ref);
+    await deleteRefs(others, admin ? 400 : 8);
+    const msgs = await fs.getDocs(kMsgColl(kid));
+    await deleteRefs(msgs.docs.map((d) => d.ref), admin ? 400 : 8);
+    let codeExists = false;
+    if (k && KCODE_RE.test(k.code)) { try { codeExists = (await fs.getDoc(kCodeRef(k.code))).exists(); } catch (e) {} }
+    const b = fs.writeBatch(db);
+    if (!admin) b.delete(kMemberRef(kid, user.uid));
+    if (codeExists) b.delete(kCodeRef(k.code));
+    b.delete(kocsmaRef(kid));
+    if (admin) b.set(logRef(), kLog("kdelete", null, kid, label));
+    await b.commit();
+    if (!admin) await unlistKocsma(user.uid, kid);
+  }
+  // Egy ember eltávolítása egy kocsmából (kilépés, a tulajdonos törlése, fióktörlés). Ha ő az alapító, a legrégebbi
+  // tag kapja meg a kocsmát; ha ő az utolsó tag, a kocsma minden adatával törlődik.
+  async function removeFromKocsma(kid, uid, opts) {
+    const o = opts || {};
+    const ks = await fs.getDoc(kocsmaRef(kid));
+    if (!ks.exists()) return "gone";
+    const k = ks.data();
+    const ms = await fs.getDocs(kMembersColl(kid));
+    const others = ms.docs.filter((d) => d.id !== uid)
+      .map((d) => ({ uid: d.id, at: Number(d.data().at) || 0 }))
+      .sort((a, b) => a.at - b.at || (a.uid < b.uid ? -1 : 1));
+    if (k.owner === uid && !others.length) {
+      if (o.admin) await wipeKocsma(kid, k, true, o.label);
+      else await wipeKocsma(kid, k, false);
+      return "deleted";
+    }
+    let codeExists = false;
+    if (KCODE_RE.test(k.code)) { try { codeExists = (await fs.getDoc(kCodeRef(k.code))).exists(); } catch (e) {} }
+    const b = fs.writeBatch(db);
+    if (k.owner === uid) b.set(kocsmaRef(kid), { owner: others[0].uid, updatedAt: Date.now() }, { merge: true });
+    b.delete(kMemberRef(kid, uid));
+    if (codeExists) b.set(kCodeRef(k.code), { m: { [uid]: fs.deleteField() } }, { merge: true });
+    if (o.admin && o.log) b.set(logRef(), kLog("kkick", uid, kid, o.label));
+    await b.commit();
+    if (o.privat) await unlistKocsma(uid, kid);
+    return k.owner === uid ? "transferred" : "left";
+  }
+  // A saját listából (private.kocsmak) egy kocsma kivétele. updateDoc: ha a dokumentum már nincs meg
+  // (pl. a fiókot közben törölték), nem hozza létre újra.
+  async function unlistKocsma(uid, kid) {
+    try { await fs.updateDoc(privRef(uid), { ["kocsmak." + kid]: fs.deleteField(), updatedAt: Date.now() }); } catch (e) {}
+  }
+  const uniqRefs = (refs) => { const seen = new Set(); return refs.filter((r) => (seen.has(r.path) ? false : (seen.add(r.path), true))); };
+  // Egy felhasználó üzenetei, barátságai és barátkérései (fióktörléshez).
+  async function socialRefs(uid, kids) {
+    const refs = [];
+    for (const kid of kids) {
+      try {
+        const s = await fs.getDocs(fs.query(kMsgColl(kid), fs.where("uid", "==", uid)));
+        s.docs.forEach((d) => refs.push(d.ref));
+      } catch (e) { console.error(e); }
+    }
+    try {
+      const fr = await fs.getDocs(friendsColl(uid));
+      for (const d of fr.docs) refs.push(friendRef(d.id, uid), d.ref);
+    } catch (e) { console.error(e); }
+    for (const dir of ["from", "to"]) {
+      try {
+        const s = await fs.getDocs(fs.query(reqColl(), fs.where(dir, "==", uid)));
+        s.docs.forEach((d) => refs.push(d.ref));
+      } catch (e) { console.error(e); }
+    }
+    return refs;
+  }
+
+  /* ----- napi napló: egy nap dokumentuma -----
+     { v: 2, cats: { shot: { "Unicum": 2 }, wine: {}, beer: {}, water: {} }, recent: [{c, d, t}],
+       party: kód | null, mig: [régi buli kódok, amelyeket már átírtunk ide], updatedAt } */
+  function dayCats(data) {
+    const out = {};
+    for (const cid of CAT_IDS) {
+      out[cid] = Object.create(null); // az italnevek mezőnevek: így egy „constructor” nevű ital sem gond
+      const src = data && data.cats && data.cats[cid] && typeof data.cats[cid] === "object" ? data.cats[cid] : {};
+      for (const [name, v] of Object.entries(src)) {
+        const n = Math.floor(Number(v));
+        if (name && n > 0) out[cid][name] = Math.min(9999, n);
+      }
+    }
+    return out;
+  }
+  function cleanRecent(list, max) {
+    const out = [];
+    for (const r of Array.isArray(list) ? list : []) {
+      if (!r || !CAT_IDS.includes(r.c) || typeof r.d !== "string" || !r.d) continue;
+      out.push({ c: r.c, d: r.d, t: Number(r.t) > 0 ? Number(r.t) : 0 });
+    }
+    out.sort((a, b) => b.t - a.t);
+    return out.slice(0, max);
+  }
+  // Egy buli résztvevői dokumentuma a felhasználó azon napjainak összege, amelyek ehhez a bulihoz tartoznak.
+  // Ugyanez a számolás van az app.js-ben (deriveParty) is; a kettőnek egyeznie kell.
+  function deriveFromDays(days, name) {
+    const sums = {};
+    for (const cid of CAT_IDS) sums[cid] = new Map();
+    let recent = [];
+    for (const d of days) {
+      const cats = dayCats(d);
+      for (const cid of CAT_IDS) {
+        for (const [nm, n] of Object.entries(cats[cid])) sums[cid].set(nm, Math.min(9999, (sums[cid].get(nm) || 0) + n));
+      }
+      recent = recent.concat(cleanRecent(d.recent, 20));
+    }
+    const out = { v: 1, name, cats: {}, recent: cleanRecent(recent, 8), updatedAt: Date.now() };
+    for (const cid of CAT_IDS) {
+      out.cats[cid] = { items: [...sums[cid]].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([nm, n]) => ({ name: nm, n })), custom: [], quick: null };
+    }
+    return out;
+  }
+  function dayDocOut(data, cats, recent, party) {
+    const o = { v: 2, cats, recent, party: party || null, updatedAt: Date.now() };
+    if (data && Array.isArray(data.mig)) o.mig = data.mig.filter((c) => typeof c === "string").slice(-100);
+    return o;
+  }
   // Tulajdonosi számláló-javítás egy résztvevő dokumentumán. Visszaadja a darabszám-változásokat kategóriánként.
   function applyOwnerOps(data, ops) {
     const out = { v: 1, name: data.name, cats: {}, recent: Array.isArray(data.recent) ? data.recent.slice(0, 8) : [], updatedAt: Date.now() };
@@ -309,17 +480,39 @@ function hand(backend, problem) {
       await withContinue((s) => authMod.sendPasswordResetEmail(auth, email.trim(), s));
     },
     // Fiók törlése: minden adat, amiről tudunk, aztán maga a fiók.
-    async deleteAccount(password, extraParties) {
+    async deleteAccount(password, extraParties, extraKocsmak) {
       const u = await reauth(password);
       const codes = new Set();
       for (const c of extraParties || []) codes.add(c);
+      let priv = {};
       try {
         const p = await fs.getDoc(privRef(u.uid));
-        if (p.exists() && p.data().parties && typeof p.data().parties === "object") Object.keys(p.data().parties).forEach((c) => codes.add(c));
+        if (p.exists()) priv = p.data();
+        if (priv.parties && typeof priv.parties === "object") Object.keys(priv.parties).forEach((c) => codes.add(c));
       } catch (e) { console.error(e); }
+      // Kocsmák: kilépés mindegyikből (alapítóként a legrégebbi tag kapja meg, utolsó tagként a kocsma törlődik).
+      const kids = new Set([...Object.keys(objOf(priv.kocsmak)), ...(extraKocsmak || [])]);
+      for (const kid of kids) {
+        try { await removeFromKocsma(kid, u.uid, {}); }
+        catch (e) {
+          console.error(e);
+          try { await fs.deleteDoc(kMemberRef(kid, u.uid)); } catch (e2) {}
+        }
+      }
+      // Üzenetek minden kocsmában, ahová írt; barátságok mindkét oldalon; barátkérések.
+      const social = await socialRefs(u.uid, new Set([...kids, ...Object.keys(objOf(priv.kmsg))]));
       let key = null;
       try { const prof = await fs.getDoc(userRef(u.uid)); if (prof.exists()) key = prof.data().usernameKey || null; } catch (e) {}
-      const refs = [];
+      const refs = [...social];
+      // Napi napló és saját ivós játékok (a napokból azt is megtudjuk, melyik bulikban volt).
+      const days = await fs.getDocs(daysColl(u.uid));
+      for (const d of days.docs) {
+        const p = d.data().party;
+        if (typeof p === "string") codes.add(p);
+        refs.push(d.ref);
+      }
+      const games = await fs.getDocs(gamesColl(u.uid));
+      for (const g of games.docs) refs.push(g.ref);
       for (const c of [...codes]) {
         if (typeof c === "string" && /^[a-z0-9-]{3,40}$/.test(c)) refs.push(playerRef(c, u.uid), voteRef(c, u.uid));
       }
@@ -327,11 +520,7 @@ function hand(backend, problem) {
         try { const m = await fs.getDoc(nameRef(key)); if (m.exists() && m.data().uid === u.uid) refs.push(nameRef(key)); } catch (e) {}
       }
       refs.push(userRef(u.uid), privRef(u.uid));
-      for (let i = 0; i < refs.length; i += 400) {
-        const b = fs.writeBatch(db);
-        refs.slice(i, i + 400).forEach((r) => b.delete(r));
-        await b.commit();
-      }
+      await deleteRefs(uniqRefs(refs), 400);
       await authMod.deleteUser(u);
       try { await fs.terminate(db); await fs.clearIndexedDbPersistence(db); } catch (e) {}
     },
@@ -390,23 +579,118 @@ function hand(backend, problem) {
     async adminWipe(uid, extraParties, label) {
       const codes = new Set(extraParties || []);
       const p = await fs.getDoc(privRef(uid));
-      if (p.exists() && p.data().parties && typeof p.data().parties === "object") Object.keys(p.data().parties).forEach((c) => codes.add(c));
+      const priv = p.exists() ? p.data() : {};
+      if (priv.parties && typeof priv.parties === "object") Object.keys(priv.parties).forEach((c) => codes.add(c));
+      // Kocsmák: eltávolítás (alapítóként a legrégebbi tag kapja meg, utolsó tagként a kocsma törlődik).
+      const kids = new Set(Object.keys(objOf(priv.kocsmak)));
+      for (const kid of kids) {
+        try { await removeFromKocsma(kid, uid, { admin: true, label }); } catch (e) { console.error(e); }
+      }
+      const social = await socialRefs(uid, new Set([...kids, ...Object.keys(objOf(priv.kmsg))]));
       let key = null;
       const prof = await fs.getDoc(userRef(uid));
       if (prof.exists()) key = prof.data().usernameKey || null;
-      const refs = [];
+      const refs = [...social];
+      const days = await fs.getDocs(daysColl(uid));
+      for (const d of days.docs) {
+        const pc = d.data().party;
+        if (typeof pc === "string") codes.add(pc);
+        refs.push(d.ref);
+      }
+      const games = await fs.getDocs(gamesColl(uid));
+      for (const g of games.docs) refs.push(g.ref);
       for (const c of codes) if (typeof c === "string" && /^[a-z0-9-]{3,40}$/.test(c)) refs.push(playerRef(c, uid), voteRef(c, uid));
       if (key) { const m = await fs.getDoc(nameRef(key)); if (m.exists() && m.data().uid === uid) refs.push(nameRef(key)); }
       refs.push(userRef(uid), privRef(uid));
+      const all = uniqRefs(refs);
       let first = true;
-      for (let i = 0; i < refs.length; i += 400) {
+      for (let i = 0; i < all.length; i += 400) {
         const b = fs.writeBatch(db);
-        refs.slice(i, i + 400).forEach((r) => b.delete(r));
+        all.slice(i, i + 400).forEach((r) => b.delete(r));
         if (first) { b.set(logRef(), logEntry("wipe", uid, null, label)); first = false; }
         await b.commit();
       }
     },
     async adminEditPlayer(party, uid, ops, statsDay, label) {
+      // Ha a résztvevő már a napi naplót használja: a napjait javítjuk, és abból számoljuk újra a buli-összegét.
+      const found = await fs.getDocs(fs.query(daysColl(uid), fs.where("party", "==", party)));
+      const keys = found.docs.map((d) => d.id).filter((k) => DAY_RE.test(k)).sort();
+      if (keys.length) {
+        await fs.runTransaction(db, async (tx) => {
+          const pref = playerRef(party, uid);
+          const psnap = await tx.get(pref);
+          const usnap = await tx.get(userRef(uid));
+          const days = [];
+          for (const k of keys) {
+            const s = await tx.get(dayRef(uid, k));
+            if (s.exists() && s.data().party === party) {
+              days.push({ key: k, data: s.data(), cats: dayCats(s.data()), recent: cleanRecent(s.data().recent, 10), touched: false });
+            }
+          }
+          if (!days.length) throw err("app/no-player");
+          const changes = {};
+          const note = (day, cid, d) => { const m = changes[day] || (changes[day] = {}); m[cid] = (m[cid] || 0) + d; };
+          for (const op of ops) {
+            if (op.type === "reset") {
+              for (const d of days) {
+                for (const cid of CAT_IDS) {
+                  for (const n of Object.values(d.cats[cid])) note(d.key, cid, -n);
+                  d.cats[cid] = Object.create(null);
+                }
+                d.recent = [];
+                d.touched = true;
+              }
+            } else if (op.type === "bump" && CAT_IDS.includes(op.cid) && typeof op.name === "string" && op.name) {
+              const up = op.delta > 0;
+              // +1 a buli utolsó napjára, −1 a legutolsó olyan napról, amelyen van ilyen ital.
+              const have = (d) => (typeof d.cats[op.cid][op.name] === "number" ? d.cats[op.cid][op.name] : 0);
+              const target = up ? days[days.length - 1] : [...days].reverse().find((d) => have(d) > 0);
+              if (!target) continue;
+              const cur = have(target);
+              const next = Math.max(0, Math.min(9999, cur + (up ? 1 : -1)));
+              if (next === cur) continue;
+              if (next) target.cats[op.cid][op.name] = next; else delete target.cats[op.cid][op.name];
+              if (!up) {
+                const i = target.recent.findIndex((r) => r.c === op.cid && r.d === op.name);
+                if (i >= 0) target.recent.splice(i, 1);
+              }
+              target.touched = true;
+              note(target.key, op.cid, next - cur);
+            }
+          }
+          let name = psnap.exists() && typeof psnap.data().name === "string" ? psnap.data().name : "";
+          if (!name && usnap.exists() && typeof usnap.data().username === "string") name = usnap.data().username;
+          name = String(name || "Névtelen").slice(0, 24);
+          for (const d of days) if (d.touched) tx.set(dayRef(uid, d.key), dayDocOut(d.data, d.cats, d.recent, party));
+          tx.set(pref, deriveFromDays(days.map((d) => ({ cats: d.cats, recent: d.recent })), name));
+          const inc = (o) => {
+            const r = {};
+            for (const [c, v] of Object.entries(o)) if (v) r[c] = fs.increment(v);
+            return r;
+          };
+          const total = {}, years = {}, perDay = {};
+          for (const [day, m] of Object.entries(changes)) {
+            const y = day.slice(0, 4);
+            for (const [cid, v] of Object.entries(m)) {
+              if (!v) continue;
+              total[cid] = (total[cid] || 0) + v;
+              const yy = years[y] || (years[y] = {});
+              yy[cid] = (yy[cid] || 0) + v;
+              const dd = perDay[day] || (perDay[day] = {});
+              dd[cid] = (dd[cid] || 0) + v;
+            }
+          }
+          if (Object.keys(inc(total)).length) {
+            const data = { total: inc(total), years: {}, days: {}, updatedAt: Date.now() };
+            for (const [y, o] of Object.entries(years)) if (Object.keys(inc(o)).length) data.years[y] = inc(o);
+            for (const [d, o] of Object.entries(perDay)) if (Object.keys(inc(o)).length) data.days[d] = inc(o);
+            tx.set(userRef(uid), data, { merge: true });
+          }
+          tx.set(logRef(), logEntry(ops.some((o) => o.type === "reset") ? "reset" : "edit", uid, party, label));
+        });
+        return;
+      }
+      // Régi adat (a résztvevő még nem lépett át a napi naplóra): közvetlenül a buli-dokumentumot javítjuk.
       await fs.runTransaction(db, async (tx) => {
         const ref = playerRef(party, uid);
         const snap = await tx.get(ref);
@@ -438,14 +722,230 @@ function hand(backend, problem) {
         fs.getDocs(fs.collection(db, "parties", party, "players")),
         fs.getDocs(fs.collection(db, "parties", party, "votes")),
       ]);
-      const refs = [...players.docs.map((d) => d.ref), ...votes.docs.map((d) => d.ref), fs.doc(db, "parties", party)];
+      // A résztvevők napjai megmaradnak (a napi naplójuk része), csak már nem tartoznak ehhez a bulihoz.
+      const dayRefs = [];
+      for (const p of players.docs) {
+        const s = await fs.getDocs(fs.query(daysColl(p.id), fs.where("party", "==", party)));
+        s.docs.forEach((d) => dayRefs.push(d.ref));
+      }
+      const ops = [
+        ...dayRefs.map((r) => (b) => b.set(r, { party: null, updatedAt: Date.now() }, { merge: true })),
+        ...[...players.docs.map((d) => d.ref), ...votes.docs.map((d) => d.ref), fs.doc(db, "parties", party)].map((r) => (b) => b.delete(r)),
+      ];
       let first = true;
-      for (let i = 0; i < refs.length; i += 400) {
+      for (let i = 0; i < ops.length; i += 400) {
         const b = fs.writeBatch(db);
-        refs.slice(i, i + 400).forEach((r) => b.delete(r));
+        ops.slice(i, i + 400).forEach((f) => f(b));
         if (first) { b.set(logRef(), logEntry("deleteparty", null, party, label)); first = false; }
         await b.commit();
       }
+    },
+
+    /* ----- tulajdonosi műveletek a kocsmákon ----- */
+    async adminListKocsmak() {
+      const s = await fs.getDocs(fs.query(fs.collection(db, "kocsmak"), fs.limit(300)));
+      return s.docs.map((d) => ({ id: d.id, data: d.data() }));
+    },
+    async adminKocsmaDetail(kid) {
+      const [k, ms, msgs] = await Promise.all([
+        fs.getDoc(kocsmaRef(kid)),
+        fs.getDocs(kMembersColl(kid)),
+        fs.getDocs(fs.query(kMsgColl(kid), fs.orderBy("at", "desc"), fs.limit(100))),
+      ]);
+      return {
+        kocsma: k.exists() ? k.data() : null,
+        members: ms.docs.map((d) => ({ id: d.id, data: d.data() })),
+        messages: msgs.docs.map((d) => ({ id: d.id, data: d.data() })),
+      };
+    },
+    async adminDeleteKMessage(kid, mid, label) {
+      const b = fs.writeBatch(db);
+      b.delete(fs.doc(kMsgColl(kid), mid));
+      b.set(logRef(), kLog("kmsg", null, kid, label));
+      await b.commit();
+    },
+    // Tag eltávolítása: új meghívókóddal, hogy a régivel ne tudjon visszalépni. Az alapítót a legrégebbi tag váltja.
+    async adminRemoveKMember(kid, uid, label) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      if (!ks.exists()) throw err("app/no-kocsma");
+      const k = ks.data();
+      const ms = await fs.getDocs(kMembersColl(kid));
+      const others = ms.docs.filter((d) => d.id !== uid).map((d) => ({ uid: d.id, at: Number(d.data().at) || 0 }))
+        .sort((a, b) => a.at - b.at || (a.uid < b.uid ? -1 : 1));
+      if (!others.length) { await wipeKocsma(kid, k, true, label); return "deleted"; }
+      let oldExists = false;
+      try { oldExists = (await fs.getDoc(kCodeRef(k.code))).exists(); } catch (e) {}
+      const m = {};
+      for (const o of others) m[o.uid] = o.at || Date.now();
+      await withNewCode((code) => {
+        const b = fs.writeBatch(db);
+        b.delete(kMemberRef(kid, uid));
+        if (oldExists) b.delete(kCodeRef(k.code));
+        b.set(kCodeRef(code), { kid, name: k.name, icon: k.icon, m });
+        const patch = { code, updatedAt: Date.now() };
+        if (k.owner === uid) patch.owner = others[0].uid;
+        b.set(kocsmaRef(kid), patch, { merge: true });
+        b.set(logRef(), kLog("kkick", uid, kid, label));
+        return b;
+      });
+      return "removed";
+    },
+    async adminDeleteKocsma(kid, label) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      await wipeKocsma(kid, ks.exists() ? ks.data() : null, true, label);
+    },
+
+    /* ----- saját adatok élőben (a kocsmáim listája több telefon között is) ----- */
+    watchPrivate(next, onError) {
+      return fs.onSnapshot(privRef(user.uid), (snap) => next(snap.exists() ? snap.data() : null), (e) => onError(e));
+    },
+
+    /* ----- kocsmák ----- */
+    watchKocsma(kid, next, onError) {
+      return fs.onSnapshot(kocsmaRef(kid), (snap) => next(snap.exists() ? snap.data() : null), (e) => onError(e));
+    },
+    watchKMembers(kid, next, onError) {
+      return watchColl(fs.query(kMembersColl(kid), fs.limit(200)), next, onError);
+    },
+    watchKMessages(kid, n, next, onError) {
+      return watchColl(fs.query(kMsgColl(kid), fs.orderBy("at", "desc"), fs.limit(n)), next, onError);
+    },
+    async getKCode(code) {
+      if (!KCODE_RE.test(code)) return null;
+      const s = await fs.getDoc(kCodeRef(code));
+      return s.exists() ? s.data() : null;
+    },
+    // Alapítás: a kocsma, az alapító tagsága és a meghívókód egyszerre jön létre.
+    async createKocsma(name, icon) {
+      const kid = fs.doc(fs.collection(db, "kocsmak")).id;
+      const now = Date.now();
+      const code = await withNewCode((c) => {
+        const b = fs.writeBatch(db);
+        b.set(kocsmaRef(kid), { name, icon, code: c, owner: user.uid, createdAt: now, updatedAt: now });
+        b.set(kMemberRef(kid, user.uid), { at: now, code: c });
+        b.set(kCodeRef(c), { kid, name, icon, m: { [user.uid]: now } });
+        b.set(privRef(user.uid), { kocsmak: { [kid]: now }, kmsg: { [kid]: now }, updatedAt: now }, { merge: true });
+        return b;
+      });
+      return { kid, code };
+    },
+    async joinKocsma(kid, code) {
+      const now = Date.now();
+      const b = fs.writeBatch(db);
+      b.set(kMemberRef(kid, user.uid), { at: now, code });
+      b.set(kCodeRef(code), { m: { [user.uid]: now } }, { merge: true });
+      b.set(privRef(user.uid), { kocsmak: { [kid]: now }, kmsg: { [kid]: now }, updatedAt: now }, { merge: true });
+      await b.commit();
+    },
+    leaveKocsma(kid) { return removeFromKocsma(kid, user.uid, { privat: true }); },
+    // Átnevezés vagy új profilkép (csak az alapító): a meghívókód előnézete is frissül.
+    async updateKocsma(kid, patch) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      if (!ks.exists()) throw err("app/no-kocsma");
+      const k = ks.data();
+      const p = {};
+      if (typeof patch.name === "string") p.name = patch.name;
+      if (typeof patch.icon === "string") p.icon = patch.icon;
+      let codeExists = false;
+      try { codeExists = (await fs.getDoc(kCodeRef(k.code))).exists(); } catch (e) {}
+      const b = fs.writeBatch(db);
+      b.set(kocsmaRef(kid), Object.assign({ updatedAt: Date.now() }, p), { merge: true });
+      if (codeExists) b.set(kCodeRef(k.code), p, { merge: true });
+      await b.commit();
+    },
+    // Új meghívókód (csak az alapító); removeUid: egy tag eltávolítása ugyanebben a lépésben.
+    async rotateKCode(kid, removeUid) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      if (!ks.exists()) throw err("app/no-kocsma");
+      const k = ks.data();
+      const ms = await fs.getDocs(kMembersColl(kid));
+      const m = {};
+      for (const d of ms.docs) if (d.id !== removeUid) m[d.id] = Number(d.data().at) || Date.now();
+      let oldExists = false;
+      try { oldExists = (await fs.getDoc(kCodeRef(k.code))).exists(); } catch (e) {}
+      return withNewCode((code) => {
+        const b = fs.writeBatch(db);
+        if (removeUid) b.delete(kMemberRef(kid, removeUid));
+        if (oldExists) b.delete(kCodeRef(k.code));
+        b.set(kCodeRef(code), { kid, name: k.name, icon: k.icon, m });
+        b.set(kocsmaRef(kid), { code, updatedAt: Date.now() }, { merge: true });
+        return b;
+      });
+    },
+    async deleteKocsma(kid) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      if (!ks.exists()) return;
+      await wipeKocsma(kid, ks.data(), false);
+    },
+    // Ha a kocsma megszűnt, vagy kikerültem belőle: a saját nyomaim eltakarítása (ha maradt).
+    async cleanupKocsma(kid) {
+      try { await fs.deleteDoc(kMemberRef(kid, user.uid)); } catch (e) {}
+      await unlistKocsma(user.uid, kid);
+    },
+    // Ha az alapító már nem tag, a legrégebbi tag átveszi a kocsmát (a szabály csak ekkor engedi).
+    claimKocsma(kid) {
+      return fs.setDoc(kocsmaRef(kid), { owner: user.uid, updatedAt: Date.now() }, { merge: true });
+    },
+    // Az alapító rendbe teszi a meghívókód előnézetét: benne csak a mostani tagok legyenek (pl. ha egy letiltott
+    // tag törölte a fiókját, és ezért nem tudta magát kivenni belőle).
+    async repairKCode(kid) {
+      const ks = await fs.getDoc(kocsmaRef(kid));
+      if (!ks.exists() || ks.data().owner !== user.uid || !KCODE_RE.test(ks.data().code)) return false;
+      const k = ks.data();
+      const [ms, cs] = await Promise.all([fs.getDocs(kMembersColl(kid)), fs.getDoc(kCodeRef(k.code))]);
+      const m = {};
+      for (const d of ms.docs) m[d.id] = Number(d.data().at) || Date.now();
+      const cur = cs.exists() ? objOf(cs.data().m) : null;
+      const same = cur && Object.keys(cur).length === Object.keys(m).length && Object.keys(m).every((u) => u in cur)
+        && cs.data().name === k.name && cs.data().icon === k.icon && cs.data().kid === kid;
+      if (same) return false;
+      await fs.setDoc(kCodeRef(k.code), { kid, name: k.name, icon: k.icon, m });
+      return true;
+    },
+    setKocsmaParty(kid, party) {
+      return fs.setDoc(kocsmaRef(kid), { party, updatedAt: Date.now() }, { merge: true });
+    },
+    sendKMessage(kid, text) {
+      const ref = fs.doc(kMsgColl(kid));
+      return { id: ref.id, done: fs.setDoc(ref, { uid: user.uid, text, at: Date.now() }) };
+    },
+    deleteKMessage(kid, mid) { return fs.deleteDoc(fs.doc(kMsgColl(kid), mid)); },
+
+    /* ----- barátok ----- */
+    watchFriends(next, onError) {
+      return watchColl(fs.query(friendsColl(user.uid), fs.limit(500)), next, onError);
+    },
+    // dir: "from" (az általam küldött kérések) vagy "to" (nekem küldött kérések)
+    watchFriendReqs(dir, next, onError) {
+      return watchColl(fs.query(reqColl(), fs.where(dir, "==", user.uid), fs.limit(200)), next, onError);
+    },
+    sendFriendRequest(to) {
+      return fs.setDoc(reqRef(user.uid, to), { from: user.uid, to, at: Date.now() });
+    },
+    // Elfogadás: mindkét barátság-dokumentum és a kérés törlése egy lépésben (ha én is jelöltem, az is törlődik).
+    async acceptFriend(from, alsoMine) {
+      const now = Date.now();
+      const b = fs.writeBatch(db);
+      b.set(friendRef(user.uid, from), { at: now });
+      b.set(friendRef(from, user.uid), { at: now });
+      b.delete(reqRef(from, user.uid));
+      if (alsoMine) b.delete(reqRef(user.uid, from));
+      await b.commit();
+    },
+    declineFriend(from) { return fs.deleteDoc(reqRef(from, user.uid)); },
+    cancelFriendRequest(to) { return fs.deleteDoc(reqRef(user.uid, to)); },
+    async removeFriend(fid) {
+      const b = fs.writeBatch(db);
+      b.delete(friendRef(user.uid, fid));
+      b.delete(friendRef(fid, user.uid));
+      await b.commit();
+    },
+    // Kocsma-meghívó egy barátnak: a barát saját barátlistájában, az én dokumentumomba kerül.
+    sendKInvite(fid, invite) {
+      return fs.setDoc(friendRef(fid, user.uid), { invite }, { merge: true });
+    },
+    dismissKInvite(fid) {
+      return fs.setDoc(friendRef(user.uid, fid), { invite: fs.deleteField() }, { merge: true });
     },
 
     /* ----- egy buli résztvevői ----- */
@@ -458,6 +958,84 @@ function hand(backend, problem) {
     },
     setPlayer(party, uid, data) { return fs.setDoc(playerRef(party, uid), data); },
     deletePlayer(party, uid) { return fs.deleteDoc(playerRef(party, uid)); },
+    // Az átálláshoz mindig a szerver friss adata kell (nem a telefonon tárolt másolat).
+    async getPlayerFresh(party, uid) {
+      const s = await fs.getDocFromServer(playerRef(party, uid));
+      return s.exists() ? s.data() : null;
+    },
+    async getPartyMetaFresh(party) {
+      const s = await fs.getDocFromServer(fs.doc(db, "parties", party));
+      return s.exists() ? s.data() : null;
+    },
+
+    /* ----- napi napló (csak a felhasználó látja) ----- */
+    watchDays(next, onError) {
+      return watchColl(fs.query(daysColl(user.uid), fs.limit(3000)), next, onError);
+    },
+    // Ital hozzáadása vagy levonása egy napon. Atomikus növelés, így két telefon sem írja felül egymást.
+    addToDay(day, changes, recent) {
+      if (!DAY_RE.test(day)) return Promise.reject(err("app/bad-day"));
+      const cats = {};
+      for (const ch of changes || []) {
+        const delta = Math.trunc(Number(ch && ch.delta));
+        if (!ch || !CAT_IDS.includes(ch.cid) || typeof ch.name !== "string" || !ch.name || !delta) continue;
+        const m = cats[ch.cid] || (cats[ch.cid] = {});
+        m[ch.name] = fs.increment(delta);
+      }
+      const data = { v: 2, updatedAt: Date.now() };
+      if (Object.keys(cats).length) data.cats = cats;
+      if (Array.isArray(recent)) data.recent = cleanRecent(recent, 10);
+      return fs.setDoc(dayRef(user.uid, day), data, { merge: true });
+    },
+    setDayParty(day, party) {
+      if (!DAY_RE.test(day)) return Promise.reject(err("app/bad-day"));
+      if (party != null && !PARTY_RE.test(party)) return Promise.reject(err("app/bad-party"));
+      return fs.setDoc(dayRef(user.uid, day), { v: 2, party: party || null, updatedAt: Date.now() }, { merge: true });
+    },
+    // Átállás: egy régi buli-számláló áthelyezése a buli napjára. Ismételhető: a mig lista jelzi, ha már megtörtént.
+    // Eredmény: "created" | "merged" (a napon már volt bulihoz nem rendelt ital) | "done" (már megvolt) | "collision" (a nap másik bulié).
+    async migrateParty(party, day, cats, recent) {
+      if (!DAY_RE.test(day) || !PARTY_RE.test(party)) throw err("app/bad-day");
+      return fs.runTransaction(db, async (tx) => {
+        const ref = dayRef(user.uid, day);
+        const s = await tx.get(ref);
+        const cur = s.exists() ? s.data() : null;
+        const mig = cur && Array.isArray(cur.mig) ? cur.mig.filter((c) => typeof c === "string") : [];
+        if (mig.includes(party)) return "done";
+        if (cur && typeof cur.party === "string" && cur.party && cur.party !== party) return "collision";
+        const merged = dayCats(cur);
+        const had = CAT_IDS.some((cid) => Object.keys(merged[cid]).length > 0);
+        const add = dayCats({ cats });
+        for (const cid of CAT_IDS) {
+          for (const [nm, n] of Object.entries(add[cid])) merged[cid][nm] = Math.min(9999, (typeof merged[cid][nm] === "number" ? merged[cid][nm] : 0) + n);
+        }
+        tx.set(ref, {
+          v: 2, cats: merged,
+          recent: cleanRecent([...((cur && Array.isArray(cur.recent)) ? cur.recent : []), ...(recent || [])], 10),
+          party, mig: [...mig, party].slice(-100), updatedAt: Date.now(),
+        });
+        return had ? "merged" : "created";
+      });
+    },
+    finishMigration(v, drinks) {
+      const data = { migrated: v, updatedAt: Date.now() };
+      if (drinks) data.drinks = drinks;
+      return fs.setDoc(privRef(user.uid), data, { merge: true });
+    },
+    // Saját italnevek és az utoljára választott fajta kategóriánként.
+    savePrefs(drinks) {
+      return fs.setDoc(privRef(user.uid), { drinks, updatedAt: Date.now() }, { merge: true });
+    },
+
+    /* ----- saját ivós játékok (csak a felhasználó látja) ----- */
+    watchGames(next, onError) {
+      return watchColl(fs.query(gamesColl(user.uid), fs.limit(500)), next, onError);
+    },
+    saveGame(id, data) {
+      const ref = id ? gameRef(user.uid, id) : fs.doc(gamesColl(user.uid));
+      return { id: ref.id, done: fs.setDoc(ref, data) };
+    },
+    deleteGame(id) { return fs.deleteDoc(gameRef(user.uid, id)); },
 
     /* ----- a buli neve és kezdete ----- */
     watchParty(party, next, onError) {

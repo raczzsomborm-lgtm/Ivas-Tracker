@@ -3,26 +3,33 @@
 Ez a fájl minden eddigi döntést és a következő fejlesztési ütemek tervét tartalmazza.
 Új beszélgetésben ezt, a teljes projektmappát és a tesztcsomagot (`masnaplo-tesztek.zip`) kell átadni, és innen lehet folytatni.
 
-## 1. A jelenlegi állapot (v8: az 1a. ütem és a Felhasználási feltételek kész)
+## 1. A jelenlegi állapot (v9: az 1a., az 1b. ütem és a Felhasználási feltételek kész)
 
 **Hosting:** GitHub Pages (repó: „Ivas Tracker”), Firebase projekt: `ivas-tracker` (Spark, ingyenes).
 **Firebase:** Authentication (Anonymous + Email/Password), Firestore (`(default)`, európai hely).
 
 ### Fájlok
 - `index.html` – teljes CSS, fejléc (MÁSNAPLÓ logó + dőlt mottó), alsó sáv (`#nav`), lebegő gombok (`#fab`, `#gameFab`),
-  `app.js?v=8`, `backend.js?v=8`.
+  `app.js?v=9`, `backend.js?v=9`.
 - `app.js` – egy IIFE, állapot az `S` objektumban. Fázisok: `boot | auth | pickname | consent | banned | loading | ready | …`.
   Statikus nézetek (nem rajzolódnak újra adatfrissítéskor): auth, pickname, consent, banned.
   `ready` fázisban fülek: `S.tab` = `games | calendar | kocsma | map | profile`. Az Ivós játékok fül kulcsolt nézet
   (a keresőmező megmarad, csak a lista frissül). Lapok (`openSheet`): dinamikusak (`add`, `day`, `daycat`, `pcat`) és
-  statikusak (űrlapok: `join`, `partyName`, `otherDay`, `game`, `account`, `owner`, `ownerUser`, `privacy`, `terms`, `delete`, `confirm`, `daysPick`).
+  statikusak (űrlapok: `join`, `partyName`, `otherDay`, `game`, `account`, `owner`, `ownerUser`, `privacy`, `terms`, `delete`, `confirm`, `daysPick`,
+  és az 1b-ben: `kList`, `kNew`, `kJoin`, `kSet`, `kInvite`, `kPick`, `fAdd`, `ownerKocsmak`, `ownerKocsma`).
   Egy lap `back` mezővel vissza gombot kap (pl. a `terms` és a `privacy` egymásra hivatkozik, és vissza lehet lépni).
+  A `confirm` lap `title` és `safe` (nem piros gomb) mezőt is kaphat.
+  A Kocsma fülön a chat kulcsolt nézet (`S.kScreen = "chat"`; a beviteli mező megmarad, csak az üzenetek frissülnek: `updateChat`).
+  Gépelés közben (`body.chat-typing`) az alsó sáv eltűnik, és a beviteli sáv a billentyűzet fölé kerül: Androidon a
+  `interactive-widget=resizes-content` (viewport meta), iOS-en a `visualViewport` alapján számolt `--kb` CSS-változó.
+  Egy felhasználó profilja (`userView`): a Kocsma fülön `S.kUser`, a Profil fülön `S.profUser`.
 - `backend.js` – Firebase modular SDK 10.12.2 dinamikus importtal (gstatic), `hand(backendObj)` adja át az appnak.
   Offline gyorsítótár (persistentLocalCache). Minden adatművelet itt van függvényként.
 - `config.js` – `STRIGULA_FIREBASE`, `MASNAPLO_PRIVACY`, `MASNAPLO_OWNER_UID`. **A felhasználó saját példányát nem szabad felülírni.**
 - `firestore.rules` – a szerveroldali védelem. Az `ownerUid()` függvényben a tulajdonos UID-ja áll (a repóban minta szöveg).
-- `sw.js` – service worker; saját fájlok: előbb hálózat; Firebase/betűk: előbb gyorsítótár. Cache: `masnaplo-v8`.
-- `manifest.webmanifest`, `icons/masnaplo-*.png`, `icons/kocsma/*.svg` (a 10 kocsma-profilkép, az 1b-ben kell).
+- `sw.js` – service worker; saját fájlok: előbb hálózat; Firebase/betűk: előbb gyorsítótár. Cache: `masnaplo-v9`
+  (a 10 kocsma-profilképet is előre menti).
+- `manifest.webmanifest`, `icons/masnaplo-*.png`, `icons/kocsma/*.svg` (a 10 kocsma-profilkép; azonosítójuk `01`…`10`, `KICONS`).
 
 ### Adatmodell (Firestore)
 - `usernames/{kisbetus_nev}` – `{uid, email?, hasEmail?, emailPending?, username, createdAt}` (változatlan).
@@ -46,18 +53,43 @@ Ez a fájl minden eddigi döntést és a következő fejlesztési ütemek tervé
   Önjavítás: a megnyitott buliban, ha a saját összesítés eltér a napoktól, újraírja (`checkMyParty`).
   Ha egy bulihoz nincs napom („régi buli”), a dokumentumhoz nem nyúl. Ha az utolsó napomat kiveszem egy buliból, törli.
 - `parties/{kód}/votes/{uid}` – hányás-szavazás (változatlan).
-- `banned/{uid}`, `adminlog/{id}` (változatlan).
+- `banned/{uid}` (változatlan), `adminlog/{id}` – `{at, action, target?, party?, kocsma?, detail?}` (v9: `kocsma` mező;
+  új műveletek: `kdelete` kocsma törlése, `kmsg` üzenet törlése, `kkick` tag eltávolítása).
+- **Barátok (v9):**
+  - `friendReqs/{küldő}_{címzett}` – `{from, to, at}`. Csak a két érintett látja (lekérdezés `where(from|to == én)`).
+    Létrehozás: csak a saját nevében, létező felhasználónak, aki még nem barátja; módosítani nem lehet; a két érintett törölheti.
+  - `users/{uid}/friends/{fid}` – `{at, invite?}`. Csak a felhasználó látja. Létrejön, ha a címzett elfogadja a kérést:
+    egy kötegben írja mindkét oldalt és törli a kérést (a szabály a kérés meglétét nézi). Barát törlése: mindkét oldal.
+  - **Kocsma-meghívó:** a barát dokumentumában (`users/{címzett}/friends/{küldő}.invite = {kid, code, name, icon, at}`),
+    a küldő írja (csak ha tagja a kocsmának, és az érvényes kódot küldi), a címzett törli. Így barát törlésekor vagy
+    fióktörléskor a meghívók is eltűnnek.
+- **Kocsmák (v9):**
+  - `kocsmak/{kid}` – `{name ≤40, icon "01"…"10", code, owner, party?: {code, day, by} | null, createdAt, updatedAt}`.
+    Csak a tagok olvassák. Az alapító (`owner`) módosíthat mindent (más tagnak adhatja, kódot cserélhet a kód dokumentumával
+    együtt); bármelyik tag csak a `party` mezőt (kocsmás buli). Ha az alapító már nem tag, bármelyik tag átveheti
+    (`claimKocsma`; az app a legrégebbi tag telefonján, 3 mp várakozás után teszi meg).
+  - `kocsmak/{kid}/members/{uid}` – `{at, code}`. Csak a tagok látják. Belépni csak az érvényes kóddal lehet, és ugyanabban a
+    kötegben a kód dokumentumába is be kell írni magát. Kilépni bárki tud; az alapító bárkit eltávolíthat.
+  - `kocsmak/{kid}/messages/{id}` – `{uid, text 1–500, at}`. Csak a tagok olvassák és írják; a saját üzenetét bárki törölheti
+    (kilépés után is, ezért a saját üzeneteit `where(uid == én)` lekérdezheti), az alapító bármelyiket.
+  - `kocsmaCodes/{kód}` – `{kid, name, icon, m: {uid: belépés ideje}}` (≤100 tag). Bárki olvashatja, akinek fiókja van és
+    ismeri a kódot (belépés előtti előnézet); listázni nem lehet. A kód 8 kisbetű/szám. Kódcserekor (új kód vagy tag
+    eltávolítása) a régi dokumentum törlődik, az új a mostani tagokkal készül. Az alapító munkamenetenként egyszer
+    rendbe teszi az `m`-et (`repairKCode`), ha olyan tag maradt benne, aki már nem tag.
+  - `private/{uid}` bővül: `kocsmak{kid: belépés}` (a kocsmáim; élőben figyeljük, több telefon között is), és
+    `kmsg{kid: idő}` (minden kocsma, aminek valaha tagja volt; fióktörléskor ebből tudjuk, hol vannak üzenetei).
 - localStorage: `strigula-parties`, `strigula-hidden-parties`, `strigula-units`, `strigula-install-hidden`,
-  `strigula-pending-email` (a `strigula-party` az átállás után törlődik).
+  `strigula-pending-email` (a `strigula-party` az átállás után törlődik), `masnaplo-kocsma` (az aktív kocsma),
+  `masnaplo-chat-read` (kocsmánként meddig olvasott a chatben).
 
 ### Szabályok és logika röviden
 - Buli-nap: hajnali 6-tól másnap hajnali 6-ig (`DAY_START_HOUR = 6`). A „Ma” félpercenként újraszámolódik.
 - Egy naphoz egy buli. Egy buli több napból is állhat (többnapos buli: „Folytatom a tegnapi bulit”).
 - Adagok, pontok, hányás-szavazás, fiókszabályok: változatlanok (rövid 4 cl/+5, bor 1 dl/+3, sör 5 dl/+2, víz 3 dl/+0,25; hányás −20).
-- Hozzájárulás: `CONSENT_V = "2026-11-26b"` (a v7-ben `"2026-11-26"` volt). Érvényes, ha `consent.v === CONSENT_V` és
-  `consent.terms === true` (`consentValid`); különben a hozzájárulási képernyő jön. A tájékoztató 1a-ra frissítve; a későbbi
-  funkciókhoz (barátok, kocsma, chat, naptár, térkép) a tájékoztatót (és ha kell, a feltételeket) bővíteni és `CONSENT_V`-t
-  emelni kell (a szöveg ezt előre jelzi).
+- Hozzájárulás: `CONSENT_V = "2026-11-27"` (v7: `"2026-11-26"`, v8: `"2026-11-26b"`). Érvényes, ha `consent.v === CONSENT_V` és
+  `consent.terms === true` (`consentValid`); különben a hozzájárulási képernyő jön. A tájékoztató 1b-re frissítve (barátok,
+  kocsmák, chat, havi ranglista, tulajdonosi jogok, törlés); a feltételek 5. pontja a kocsmákkal és a chat-üzenetekkel bővült.
+  A későbbi funkciókhoz (naptár, térkép) a tájékoztatót bővíteni és `CONSENT_V`-t emelni kell.
 - **Felhasználási feltételek (v8):** a lap szövege az `app.js` `termsContent()` függvényében (a 3/b. pontban rögzített szöveg),
   a dátumok az `app.js` elején: `TERMS_DATE`, `PRIVACY_DATE`. A [Név] és az [Elérhetőség] a `privacyInfo()`-ból jön
   (`config.js` → `MASNAPLO_PRIVACY`); a `privacyInfo().missing` mondja meg, mi nincs kitöltve, ilyenkor a Tulajdonos sor és
@@ -76,9 +108,23 @@ Ez a fájl minden eddigi döntést és a következő fejlesztési ütemek tervé
   újraszámolja a buli-összesítést; ha nincsenek (még át nem állt felhasználó), a régi módon a player-dokumentumot.
   Buli törlése (`adminDeleteParty`): a résztvevők napjaiban `party: null`, a napló megmarad.
 - Fióktörlés és tulajdonosi „összes adat törlése”: a napokat és a játékokat is törli, a napokból kiolvasott bulikkal együtt.
+  v9: a kocsmákból kilép (`removeFromKocsma`: alapítóként a legrégebbi tag kapja meg, utolsó tagként a kocsma minden adatával
+  törlődik), törli az üzeneteit minden kocsmában a `kocsmak` és a `kmsg` alapján, a barátságait mindkét oldalon és a
+  barátkéréseit. Letiltott felhasználó a kocsmát nem olvashatja: ilyenkor csak a saját tagságát és üzeneteit törli, a kocsmát
+  a legrégebbi tag veszi át.
+- **A szabályok get/exists korlátja:** egy írásban legfeljebb 10, egy kötegben legfeljebb 20 hívás. Ezért ahol a szabály
+  dokumentumot olvas (pl. az alapító jogát nézi), kis kötegekkel törlünk (`deleteRefs(…, 8)`), a tulajdonosi ágak
+  (`ownerFresh()`) pedig elöl állnak, hogy ne hívjanak semmit. A tesztszerver ezt a korlátot szigorúbban is ellenőrzi.
+- **Kocsmák a felületen:** fejléc (profilkép, név, taglétszám; koppintásra váltás / új kocsma / belépés), Chat · Buli ·
+  Meghívás · Kezelés gomb, „Ma” sáv, kocsmás buli kártya, mai buli, havi ranglista (hónap váltható), Korábbi bulijaim,
+  Mindenki együtt. Kocsma nélkül egy bemutató kártya („Kocsma alapítása”, „Belépés kocsmába”). Meghívó link: `?kocsma=kód`.
+  Jelzőpötty az alsó sávon: új barátkérés (Profil), meghívó vagy olvasatlan üzenet (Kocsma).
+- **Kocsmás buli:** a Buli gomb a kocsma nevével és a dátummal indít egy közönséges bulit (a mai nap oda kerül), és a kocsmába
+  beírja (`party: {code, day, by}`). A többi tag a Kocsma fülön egy „Csatlakozom” gombbal lép be (ha máshol volt, rákérdez).
+  Senki napja nem kerül be magától.
 - Meghívó link (`?buli=kód`): ismeretlen kódnál meghívó lap (előnézettel), ismert kódnál csak megnyitja a bulit.
 
-### Tesztelés (így készült a v7 és a v8)
+### Tesztelés (így készült a v7, a v8 és a v9)
 - `masnaplo-tesztek.zip`: hamis Firebase SDK modulok (`fakefb/`: app, auth, firestore – a gstatic címeket Playwright
   útvonallal ezekre cseréljük), egy Node-oldali hamis szerver (`store.js`) a `firestore.rules` kézzel írt tükrével
   (minden írást és olvasást ellenőriz, az elutasítottakat gyűjti), és Playwright Chromium tesztek 390×844-es telefonméretben:
@@ -94,23 +140,39 @@ Ez a fájl minden eddigi döntést és a következő fejlesztési ütemek tervé
     elfogadás nélkül nem lehet továbblépni (hozzájárulási képernyő és regisztráció), `consent.terms` mentése, régi és
     hiányos hozzájárulás, elérhetőség a Profilból / regisztrációból / Letiltva képernyőről, emlékeztetők, tulajdonosi
     figyelmeztetés hiányzó `MASNAPLO_PRIVACY` adatnál.
+  - `t7_friends.js` – barátkérés (hibás, saját, ismeretlen, dupla), elfogadás, kölcsönös jelölés, elutasítás, visszavonás,
+    barát törlése és újra jelölés, egy barát profilja, és 14 nyers (az appot megkerülő) írás, amit a szabály nem enged.
+  - `t8_kocsma.js` – alapítás, belépés kóddal/linkkel/baráti meghívóval előnézettel, chat (élő, olvasatlan, törlés, 500
+    karakter, korábbi üzenetek), kocsmás buli, havi ranglista, kezelés (átnevezés, kép, új kód, tag eltávolítása), több
+    kocsma és váltás, kilépés (alapítói szerep átadása, utolsó tag), a kocsma törlése sok üzenettel, és 21 nyers művelet.
+  - `t9_kocsma_admin.js` – a tulajdonos a kocsmákban (üzenet, tag, kocsma törlése, naplózva), fióktörlés kocsmákkal,
+    üzenetekkel és barátokkal (semmi nem marad, ami a felhasználóhoz kötődne), letiltott alapító fióktörlése és a kocsma
+    átvétele, tulajdonosi „összes adat törlése”.
+  - `social.js` – segédek: kész fiók (`addAccount`), nyers Firestore-műveletek a lapon belül (`raw`), kocsma-lépések.
   - `shots.js` – képernyőképek világos és sötét módban (benne a hozzájárulási képernyő, a regisztráció, a Felhasználási
-    feltételek lap és a tulajdonosi figyelmeztetés is).
+    feltételek lap, a tulajdonosi figyelmeztetés, a kocsma, a chat, a meghívók, a ranglista és a barátok is).
   A `harness.js` `appConst("CONSENT_V")` az app.js-ből olvassa ki az állandót, így a tesztet nem kell minden emeléskor átírni.
   Futtatás: Node 18+ és Playwright (Chromium) kell, más nem. A tesztcsomagot a projektmappa mellé kell kibontani, majd
   pl. `cd masnaplo-tesztek && TZ=Europe/Budapest node t1_migration.js`. Az `APP_DIR` mondja meg, melyik mappát szolgálja ki
   (alapból `../masnaplo`), az `OLD_DIR` a régi (v6) változatot (alapból a csomagban lévő `regi-v6`).
 - **Korlát:** a valódi Firestore-emulátor ebben a környezetben nem volt elérhető, ezért a szabályokat a tükör teszteli.
-  A `firestore.rules` szintaxisát a Firebase konzol a Publish-kor ellenőrzi. Új szabálynál a tükröt (`store.js` `rule()`)
-  is frissíteni kell.
+  A `firestore.rules` szintaxisát a Firebase hivatalos szabály-nyelvtanával (`@firebase/eslint-plugin-security-rules`
+  értelmezője) ellenőriztük; a Firebase konzol a Publish-kor is ellenőrzi. Új szabálynál a tükröt (`store.js` `rule()`)
+  is frissíteni kell. A tükör a lekérdezéseknél a `where` feltételből dönt (mint a valódi szabálymotor), és számolja a
+  get/exists hívásokat.
 
 ## 2. A felhasználó döntései (érvényesek)
 
 - **Kocsma-profilképek:** a 10 kiválasztott ikon (`icons/kocsma/01…10`).
 - **Chat:** egyelőre **csak szöveges** (képek/videók később; videóhoz Firebase Blaze kellene).
 - **Naptár-import:** **Google Naptár** (Google-belépés, `calendar.readonly`; egyszeri Google Cloud OAuth-beállítás kell).
-- **A hónap ivója:** **pontok** alapján (rövid 5, bor 3, sör 2, víz 0,25), csak italok; a hányás-büntetés a bulik versenyében marad.
-  Kihirdetés: a hónap utáni első megnyitáskor a kocsmában (egy tag kliense írja be, idempotensen, hónap szerinti azonosítóval).
+- **A hónap ivója: KIMARAD** (a felhasználó döntése az 1b-nél). Helyette **pontos havi ranglista** a kocsmában
+  (rövid 5, bor 3, sör 2, víz 0,25, csak italok, helyezéssel; a hányás-büntetés csak a bulik versenyében van).
+  Megjegyzés: a Google Play szabályzata tiltja a versenyszerű ivás kedvező bemutatását; nyilvános Play-kiadásnál ezt újra kell gondolni.
+- **Kocsmás buli (Buli gomb):** egy koppintással csatlakozás, senki napja nem kerül be magától.
+- **Kocsma kezelése:** az alapító kezeli (átnevezés, kép, tag eltávolítása új kóddal, új kód, törlés); kilépéskor a legrégebbi
+  tag örökli; bárki kiléphet és a saját üzenetét törölheti; a Tulajdonos friss jelszóval bármit törölhet, naplózva.
+- **Barátok:** lista + kérések + barát profilja + egy koppintásos kocsma-meghívó (a meghívott előnézet után dönt).
 - **Térkép helyadatai:** **csak a felhasználó látja** a sajátjait. Hely csak engedéllyel.
 - **Kocsmák:** egy felhasználó **több kocsmának is tagja lehet, és válthat közöttük**.
 - **Ital felírása:** a Kocsma fül tetején „Ma” sáv (4 kategória, +1), és lebegő + gomb minden fülön (kész).
@@ -127,7 +189,11 @@ Napjaim, beállítások), Ivós játékok fül, Naptár/Térkép „hamarosan”
 A Kocsma fül most: „Ma” sáv → mai buli (verseny, tagok monogrammal; egy emberre koppintva részletek és szavazás) vagy
 „Új buli / Belépés kóddal” → Korábbi bulijaim → Mindenki együtt → „Hamarosan: kocsmák”.
 
-### 1b. ütem – barátok és kocsmák
+### 1b. ütem – barátok és kocsmák: KÉSZ (v9)
+A megvalósítás az 1. részben (adatmodell, szabályok, felület), a döntések a 2. részben. Eltérések a lenti eredeti tervtől:
+a hónap ivója kimaradt; a barátkérések gyűjteménye `friendReqs`; a meghívókód előnézete a `kocsmaCodes`-ban van, a
+tagok listája csak a tagoknak látszik (a kód előnézetében az `m` mezőből); a kocsma-meghívó a barátság dokumentumában van.
+Az eredeti terv:
 1. **Barátok:** jelölés felhasználónév alapján, elfogadás/elutasítás; `friendRequests`, `users/{uid}/friends/{uid}`.
 2. **Kocsma:** alapítás (név, 10 ikonból profilkép), meghívókód; belépés kóddal **előnézettel** (név, profilkép, tagok listája egymás alatt);
    több kocsma, váltás közöttük. Javasolt: `kocsmak/{id}` (név, ikon, kód, tulajdonos), `kocsmak/{id}/members/{uid}`,
@@ -136,7 +202,7 @@ A Kocsma fül most: „Ma” sáv → mai buli (verseny, tagok monogrammal; egy 
    (tagok egymás alatt, profilkép + név + pont), tagra koppintva a profilja (közérdekű adatok: fogyasztás, statisztika).
    A mai buli és a Korábbi bulijaim a kocsma alá kerülhet.
 4. **Chat:** szöveges, `kocsmak/{id}/messages/{id}`, csak tagok olvashatják/írhatják.
-5. **A hónap ivója:** havi pontok a `users/{uid}.days` alapján; kihirdetés a hónap után (`kocsmak/{id}/awards/{ÉÉÉÉ-HH}`).
+5. **A hónap ivója:** KIMARADT (a felhasználó döntése). Eredetileg: havi pontok a `users/{uid}.days` alapján; kihirdetés a hónap után (`kocsmak/{id}/awards/{ÉÉÉÉ-HH}`).
 6. Tájékoztató bővítése (barátok, kocsmatagság, chat, a hónap ivója), `CONSENT_V` emelése; fióktörléskor ezek törlése is.
 
 ### 2. ütem – naptár
@@ -145,7 +211,8 @@ A Kocsma fül most: „Ma” sáv → mai buli (verseny, tagok monogrammal; egy 
   OAuth-hozzájárulási képernyőt és webes klienst kell beállítania (tesztfelhasználókkal, ellenőrzés nélkül max. 100 fő).
 - **Buli előre bejelentése:** dátum vagy időszak; a kezdőnap reggel 6-kor „automatikusan indul”: amikor a meghívottak megnyitják az appot,
   az aznapi napjuk már ehhez a bulihoz tartozik (a napi napló `party` mezője ezt már tudja). Push értesítés szerver nélkül nem lehetséges.
-- **Kocsmás buli:** a kocsma „Buli” gombjával; a kocsma minden tagja automatikusan bekerül.
+- **Kocsmás buli:** a „Buli” gomb az 1b-ben elkészült (egy koppintásos csatlakozással). A naptárral jöhet az előre bejelentett
+  kocsmás buli.
 
 ### 3. ütem – térkép
 - MapLibre GL JS 5 földgömb-vetülettel + OpenFreeMap vektorcsempék (ingyenes, kulcs nélkül).
@@ -178,7 +245,7 @@ ezért a szöveg ezt kifejezetten kiveszi (különben a kikötés ebben a rész�
 > Az appban megjelenő mennyiségek (például egy rövid 4 cl, egy sör 5 dl) becslések, a felhasználók által beírt adatokon alapulnak, és eltérhetnek a valóságtól. Az app nem méri és nem becsüli a véralkoholszintet, nem nyújt orvosi tanácsot, és nem alkalmas annak megítélésére, hogy valaki vezethet-e, dolgozhat-e, vagy hogy egészségügyi szempontból mennyi alkohol biztonságos számára.
 >
 > **5. Ivós játékok és a felhasználók által beírt tartalom**
-> Az ivós játékokat a felhasználók maguk írják; az üzemeltető ezeket nem ellenőrzi, nem ajánlja és nem vállal értük felelősséget. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja.
+> Az ivós játékokat a felhasználók maguk írják; az üzemeltető ezeket nem ellenőrzi, nem ajánlja és nem vállal értük felelősséget. Minden játékot mindenki a saját felelősségére játszik; tartsátok be a jogszabályokat és a helyszín szabályait, és vegyétek figyelembe egymás egészségét és határait. Mindenki maga felel azért, amit az appba beír (italok, nevek, szavazatok, játékok, kocsmák és chat-üzenetek). Tilos jogsértő, mások jogait vagy jó hírnevét sértő, illetve bántó tartalmat beírni. Az üzemeltető az ilyen tartalmat eltávolíthatja, a fiókot letilthatja.
 >
 > **6. Az app „ahogy van” működik**
 > Az app egy baráti társaság szabadidős, ingyenes fejlesztése. Az üzemeltető nem vállal kötelezettséget és nem ad garanciát arra, hogy az app hibátlanul vagy megszakítás nélkül működik, hogy az adatok pontosak, teljesek vagy mindig elérhetők, illetve hogy nem vesznek el. Az üzemeltető az appot bármikor módosíthatja, szüneteltetheti vagy megszüntetheti. Az app külső szolgáltatásokat használ (Google Firebase, GitHub); ezek működéséért az üzemeltető nem felel.
@@ -223,18 +290,17 @@ ezért a szöveg ezt kifejezetten kiveszi (különben a kikötés ebben a rész�
    mit és hol cseréljek le.
 
 ## 4. Adatkezelési tájékoztató és Felhasználási feltételek – még hátralévő változások
-- Felhasználási feltételek 5. pont: a felhasználók által beírt tartalom felsorolását a chat-üzenetekkel, a kocsmák nevével
-  és később a profilképekkel bővíteni; a tulajdonos moderálási joga a kocsmákra is. Ilyenkor `TERMS_DATE` és `CONSENT_V` emelése.
-- Barátkapcsolatok, kocsmatagság, chat-üzenetek (tárolás ideje, ki látja: a kocsma tagjai), naptári események,
-  Google Naptár-hozzáférés (csak olvasás, csak a felhasználó kérésére, visszavonható), helyadatok (csak engedéllyel,
-  csak a felhasználó látja), a hónap ivója kihirdetése a kocsmában.
-- Fióktörléskor ezek törlése is (üzenetek: javaslat: törlés).
-- A tulajdonosi jogosultságok kiterjesztése a kocsmákra (moderálás) – a naplózással együtt.
+- Kész (v9): barátok, kocsmatagság, chat-üzenetek (ki látja, meddig tároljuk), havi ranglista, a tulajdonos moderálási joga a
+  kocsmákra (naplózva), fióktörléskor ezek törlése; a feltételek 5. pontja a kocsmákkal és a chat-üzenetekkel bővült.
+- Hátra van: naptári események, Google Naptár-hozzáférés (csak olvasás, csak a felhasználó kérésére, visszavonható),
+  helyadatok (csak engedéllyel, csak a felhasználó látja), később a felhasználói profilképek.
+- Ha a chat nyilvánosabb lesz, vagy az app a Google Playre kerül: a Play felhasználói tartalomra vonatkozó szabálya az appon
+  belüli jelentést (és 1:1 kapcsolatnál tiltást) is kéri.
 
 ## 5. Fontos figyelmeztetések a folytatáshoz
 - A felhasználó **ne töltse fel a csomagban lévő `config.js`-t és ne másolja be a minta `firestore.rules`-t UID nélkül**, mert azokban
   az ő saját adatai (név, UID) helyett minta szöveg áll. Új szabályoknál mindig emlékeztetni: az `ownerUid()`-ba írja vissza a UID-ját.
-- Fájlverziók: a `?v=` számot és a service worker cache nevét minden kiadásnál emelni kell (most: 8).
+- Fájlverziók: a `?v=` számot és a service worker cache nevét minden kiadásnál emelni kell (most: 9).
 - A meglévő felhasználók adatai (statisztika, napok, bulik, fiókok) nem veszhetnek el; minden átállást kliensoldali,
   ismételhető (idempotens) migrációval. Új migrációnál `MIGRATION_V` emelése és a `private.migrated` jelző használata.
 - Ha a régi kliens (v6) egy ideig még fut valakinél, ugyanabban a buliban az új apppal együtt is működik (tesztelve).

@@ -2,6 +2,7 @@
 
 Telefonra telepíthető napi ivásnapló, buli számláló és verseny barátoknak. Mindenki a saját fiókjával lép be,
 naponta felírja, mit ivott (buli nélkül is), és ha egy napját buliba rendeli, a buli többi résztvevője élőben látja.
+A barátok kocsmákba (állandó baráti társaságokba) gyűlnek: közös chat, havi ranglista és egy gombbal indítható kocsmás buli.
 
 ## Mi van a mappában
 
@@ -10,6 +11,23 @@ naponta felírja, mit ivott (buli nélkül is), és ha egy napját buliba rendel
 - `config.js`: a Firebase projekted adatai (már ki van töltve az ivas-tracker projekttel)
 - `firestore.rules`: az adatbázis szabályai, ezt a Firebase konzolba kell bemásolni
 - `manifest.webmanifest`, `sw.js`, `icons/`: ettől települ appként a telefonra
+
+## Frissítés a barátokra és kocsmákra (v9)
+
+Ezt a sorrendet tartsd be, mert az új app az új szabályok nélkül nem tud kocsmát alapítani és barátot jelölni.
+Ha a v7-et vagy a v8-at még nem töltötted fel, nem baj: ez a lépéssor azokat is tartalmazza (a v7 átállása magától lefut).
+
+1. **Firebase → Firestore → Rules:** másold be az új `firestore.rules` teljes tartalmát, majd **a fájl elején az
+   `ownerUid()` részbe írd vissza a saját UID-odat** (a mintában `IDE_JON_A_SAJAT_UID` áll), és **Publish**.
+   Az új szabályok a régebbi appot is kiszolgálják, így ez a lépés semmit nem ront el. Új index nem kell.
+2. **Nézd meg a saját `config.js`-edet:** a `MASNAPLO_PRIVACY` részben a `controller` (a neved) és a `contact`
+   legyen kitöltve (ez kerül a Felhasználási feltételekbe és a tájékoztatóba). Ha nincs, töltsd ki, és csak ebben az
+   esetben töltsd fel a `config.js`-t is.
+3. **GitHub:** **Add file → Upload files**, és húzd be ezeket: `index.html`, `app.js`, `backend.js`, `sw.js`,
+   `firestore.rules` (a UID-oddal, vagy hagyd ki), `README.md`, `FEJLESZTES.md`, valamint az **`icons/kocsma`** mappát
+   (a 10 kocsma-profilkép; ha már fent van, nem kell újra). Majd **Commit changes**.
+4. Nyisd meg az appot. Mivel bővült az adatkezelési tájékoztató (barátok, kocsmák, chat), mindenki egyszer újra látja a
+   hozzájárulási képernyőt, és újra elfogadja a feltételeket.
 
 ## Frissítés a Felhasználási feltételekkel (v8)
 
@@ -63,6 +81,13 @@ visszajön a net, ott folytatja, ahol abbahagyta, és semmit nem számol kétsze
   Ha valaki a feloldott telefonodhoz hozzáfér, jelszó nélkül akkor sem tud semmit csinálni.
 - Minden tulajdonosi művelet bekerül egy naplóba, amit az appból sem módosítani, sem törölni nem lehet.
 - A tulajdonost nem lehet letiltani, és a saját fiókodat a menüből nem lehet kiüríteni.
+
+**Kocsmák kezelése (Tulajdonos menü → Kocsmák kezelése):** az összes kocsma listája; egy kocsmára koppintva látod a
+tagjait és az utolsó 100 üzenetét, és törölhetsz üzenetet, eltávolíthatsz tagot (ilyenkor új meghívókód készül, és ha
+az alapítót veszed ki, a legrégebbi tag kapja meg a kocsmát), vagy törölheted az egész kocsmát. Ha egy olyan kocsma
+chatjében vagy, amelynek nem te vagy az alapítója, feloldott tulajdonosi módban ott is törölhetsz bármelyik üzenetet.
+Minden ilyen művelet bekerül a naplóba. Egy felhasználó „összes adatának törlése” a barátságait, barátkéréseit és
+chat-üzeneteit is törli, és kiveszi a kocsmáiból.
 
 **Ha a `config.js`-ben nincs kitöltve a neved vagy az elérhetőséged** (`MASNAPLO_PRIVACY`), a Tulajdonos sor és a
 Tulajdonos menü pirossal jelzi, mert enélkül a Felhasználási feltételek és az Adatkezelési tájékoztató nem nevezi meg
@@ -126,18 +151,40 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
   hozzájárul az adatkezeléshez. A hozzájárulás (és a feltételek elfogadásának) időpontja a szerveren, csak a felhasználó
   és a tulajdonos számára olvashatóan tárolódik.
 - Az adatkezelési tájékoztató a regisztrációnál, a hozzájárulási képernyőn és a Profil fülön is elérhető.
-- A napi napló részleteit (melyik nap pontosan mit ivott, melyik napja melyik bulihoz tartozik) és a saját ivós
-  játékokat csak a felhasználó látja (és a tulajdonos, friss jelszóval). A statisztikát (kategóriánként, napi
-  bontásban is) és a bulikon felírt italokat a többiek is látják.
+- A napi napló részleteit (melyik nap pontosan mit ivott, melyik napja melyik bulihoz tartozik), a saját ivós
+  játékokat és a barátlistát csak a felhasználó látja (és a tulajdonos, friss jelszóval). A statisztikát (kategóriánként,
+  napi bontásban is) és a bulikon felírt italokat a többiek is látják.
+- Egy barátkérést a küldője és a címzettje lát. Egy kocsma nevét, profilképét és tagjait az látja, akinek megvan a
+  meghívókódja; a chatet, a kocsmás bulit és a meghívókódot csak a kocsma tagjai. A havi ranglista a tagok nyilvános
+  statisztikájából számol.
 - **Fiókom törlése** (Profil): a jelszó megadása után törli a fiókot, a felhasználónevet, a statisztikát, a napi naplót,
-  a saját ivós játékokat, valamint a buli-összesítéseket és a szavazatokat minden olyan buliból, amelyet a felhasználó
-  ezzel a fiókkal bármelyik eszközén megnyitott, vagy amelyhez napot rendelt. Ha valakinek egy régebbi buliban mégis
+  a saját ivós játékokat, a barátságokat és barátkéréseket, minden chat-üzenetet (azokban a kocsmákban is, amelyekből
+  korábban kilépett), valamint a buli-összesítéseket és a szavazatokat minden olyan buliból, amelyet a felhasználó
+  ezzel a fiókkal bármelyik eszközén megnyitott, vagy amelyhez napot rendelt. A kocsmáiból kilép: ahol alapító, ott a
+  legrégebbi tag kapja meg a kocsmát; ahol ő az utolsó tag, a kocsma minden adatával törlődik. Ha valakinek egy régebbi buliban mégis
   maradna adata (például egy azóta nem használt telefonról), azt a Firebase konzolban kézzel lehet törölni:
   Firestore → `parties` → a buli kódja → `players`, illetve `votes` → az illető azonosítója.
 
 ## Használat
 
-- **Alsó sáv:** Ivós játékok · Naptár · **Kocsma** (középen) · Térkép · Profil (a saját monogramod).
+- **Alsó sáv:** Ivós játékok · Naptár · **Kocsma** (középen) · Térkép · Profil (a saját monogramod). Egy kis narancs
+  pötty jelzi az új barátkérést (Profil), illetve a kocsma-meghívót vagy az olvasatlan chat-üzenetet (Kocsma).
+- **Kocsma:** állandó baráti társaság. A Kocsma fülön **Kocsma alapítása** (név és a 10 profilkép egyike) vagy
+  **Belépés kocsmába** (meghívókóddal vagy a meghívó linkkel; belépés előtt látod a nevét, a képét és a tagjait).
+  Egyszerre több kocsmának is tagja lehetsz: a fejlécre koppintva válthatsz közöttük, vagy alapíthatsz újat.
+  - **Chat:** szöveges, csak a tagok látják (legfeljebb 500 karakter). A saját üzenetedet rákoppintva törölheted, az alapító
+    bármelyiket. Az olvasatlan üzenetek száma a Chat gombon látszik.
+  - **Buli:** kocsmás bulit indít a kocsma nevével; a mai napod ebbe kerül, a tagok pedig a Kocsma fülön egy
+    „Csatlakozom” gombbal léphetnek be (senki napja nem kerül be magától).
+  - **Meghívás:** a meghívó link vagy a kód küldése, vagy egy barátod meghívása egy koppintással (ő a Kocsma fülön
+    látja a meghívót, és előnézet után dönt).
+  - **Kezelés:** a meghívókód és a tagok listája, kilépés. Az alapító átnevezheti a kocsmát, profilképet cserélhet,
+    tagot távolíthat el (ilyenkor új meghívókód készül, hogy a régivel ne lehessen visszalépni), új meghívókódot kérhet,
+    és törölheti a kocsmát. Ha az alapító kilép, a legrégebbi tag kapja meg; ha az utolsó tag lép ki, a kocsma törlődik.
+  - **Havi ranglista:** a tagok pontjai a hónap minden napjából (bulival vagy anélkül), ugyanazzal a pontozással, mint a
+    buliban, de hányás nélkül. Korábbi hónapok is visszanézhetők. Egy tagra koppintva a profilja látszik.
+- **Barátok (Profil fül):** **Barát hozzáadása** felhasználónév alapján; a kérést a másik elfogadhatja vagy elutasíthatja,
+  te visszavonhatod. Egy barátra koppintva a statisztikája látszik, és meghívhatod a kocsmádba.
 - **Kocsma fül, „Ma” sáv:** a négy kategória (rövid, bor, sör, víz) mai darabszáma. A **+1** gomb az alatta kiírt,
   utoljára választott fajtát írja fel (pl. Unicum). A kategóriára koppintva fajtánként is felírhatsz vagy levonhatsz.
   Egy nap hajnali 6-tól másnap hajnali 6-ig tart, így az éjfél utáni italok is ugyanahhoz a naphoz kerülnek.
@@ -150,7 +197,7 @@ A letiltás és az adatok törlése után ez a rekord már semmire nem használh
 - **Buli nézet:** verseny (a résztvevők egymás alatt, monogrammal), egy emberre koppintva a részletei és a
   hányás-szavazás, a buli közös összege és a legutóbbi italok. A buli bármikor átnevezhető.
 - **Korábbi bulijaim:** a Kocsma fül alján; egy bulira koppintva megnyílik. Az × csak erről a telefonról veszi le.
-- **Profil fül:** saját statisztika (idén és összesen), napi grafikon, **Napjaim** és a beállítások.
+- **Profil fül:** saját statisztika (idén és összesen), napi grafikon, **Napjaim**, **Barátaim** és a beállítások.
   A Napjaim listában bármelyik nap megnyitható: utólag javíthatod (+/−, ez a statisztikát és a buli összesítését is
   frissíti), és buliba rendelheted (meglévő bulidhoz, új bulihoz névvel, vagy kóddal), illetve kiveheted belőle.
   A „Másik nap” gombbal egy korábbi, még üres napot is felírhatsz.

@@ -1,10 +1,14 @@
 /* Másnapló service worker: az app héját offline is elérhetővé teszi.
    Saját fájlok: előbb hálózat, ha nincs net, a mentett példány (így a frissítések mindig megjönnek).
    Firebase könyvtárak és betűtípusok: verziózott, változatlan fájlok, ezért előbb a mentett példány. */
-const CACHE = "masnaplo-v8";
+const CACHE = "masnaplo-v9";
 const SHELL = [
-  "./", "./index.html", "./app.js?v=8", "./backend.js?v=8", "./config.js", "./manifest.webmanifest",
+  "./", "./index.html", "./app.js?v=9", "./backend.js?v=9", "./config.js", "./manifest.webmanifest",
   "./icons/masnaplo-192.png", "./icons/masnaplo-512.png", "./icons/masnaplo-apple-180.png",
+  "./icons/kocsma/01-koccinto-korsok.svg", "./icons/kocsma/02-sorcsap.svg", "./icons/kocsma/03-hordo.svg",
+  "./icons/kocsma/04-harom-kupica.svg", "./icons/kocsma/05-tequila.svg", "./icons/kocsma/06-martini.svg",
+  "./icons/kocsma/07-bor-es-pohar.svg", "./icons/kocsma/08-koccinto-borospoharak.svg", "./icons/kocsma/09-diszkogomb.svg",
+  "./icons/kocsma/10-ejszakai-sor.svg",
 ];
 
 self.addEventListener("install", (e) => {
