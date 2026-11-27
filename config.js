@@ -17,7 +17,7 @@ window.STRIGULA_FIREBASE = {
 */
 window.MASNAPLO_PRIVACY = {
   controller: "Rácz Zsombor Marcell",
-  contact: "racz.zsombor.marcell@gmail.com"
+  contact: "racz.zsomborm@gmail.com"
 };
 
 /*

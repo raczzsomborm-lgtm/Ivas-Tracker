@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ===== A TULAJDONOS =====
-    // Ide írd a saját fiókazonosítódat (UID). Az appban: Beállítások, Fiók, Fiókazonosító.
+    // Ide írd a saját fiókazonosítódat (UID). Az appban: Profil, Fiók és e-mail, Fiókazonosító.
     // Amíg itt a minta szöveg áll, senkinek nincs tulajdonosi joga.
     function ownerUid() {
       return '3hTaBCw1TYdBJt4mfVm3w0mEm7y1';
@@ -78,6 +78,101 @@ service cloud.firestore {
     function validVotes(d) {
       return d.keys().hasOnly(['on', 'updatedAt']) && d.on is map;
     }
+    // Egy nap a napi naplóban. A dokumentum azonosítója a nap: ÉÉÉÉ-HH-NN.
+    function validDay(dayId, d) {
+      return dayId.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.keys().hasOnly(['v', 'cats', 'recent', 'party', 'mig', 'updatedAt'])
+        && (!('cats' in d) || d.cats is map)
+        && (!('recent' in d) || (d.recent is list && d.recent.size() <= 20))
+        && (!('party' in d) || d.party == null || (d.party is string && d.party.matches('^[a-z0-9-]{3,40}$')))
+        && (!('mig' in d) || (d.mig is list && d.mig.size() <= 100))
+        && d.updatedAt is number;
+    }
+    // ===== Barátok és kocsmák =====
+    function kocsmaPath(kid) {
+      return /databases/$(database)/documents/kocsmak/$(kid);
+    }
+    function kMemberPath(kid, uid) {
+      return /databases/$(database)/documents/kocsmak/$(kid)/members/$(uid);
+    }
+    function kCodePath(code) {
+      return /databases/$(database)/documents/kocsmaCodes/$(code);
+    }
+    // A kocsma tagja (fiókkal rendelkező, nem letiltott felhasználó, akinek van tagsági dokumentuma).
+    function isKMember(kid) {
+      return member() && exists(kMemberPath(kid, request.auth.uid));
+    }
+    function validKName(n) {
+      return n is string && n.size() > 0 && n.size() <= 40;
+    }
+    function validKIcon(i) {
+      return i is string && i.matches('^(0[1-9]|10)$');
+    }
+    function validKCode(c) {
+      return c is string && c.matches('^[a-z0-9]{8}$');
+    }
+    // A kocsmás buli: a buli kódja, a napja és aki indította.
+    function validKParty(p) {
+      return p == null || (p is map
+        && p.keys().hasOnly(['code', 'day', 'by'])
+        && p.code is string && p.code.matches('^[a-z0-9-]{3,40}$')
+        && p.day is string && p.day.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && p.by is string);
+    }
+    function validKocsma(d) {
+      return d.keys().hasOnly(['name', 'icon', 'code', 'owner', 'party', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['name', 'icon', 'code', 'owner', 'createdAt', 'updatedAt'])
+        && validKName(d.name) && validKIcon(d.icon) && validKCode(d.code)
+        && d.owner is string && d.createdAt is number && d.updatedAt is number
+        && (!('party' in d) || validKParty(d.party));
+    }
+    // Meghívókód → kocsma. Belépés előtt ebből látszik a név, a profilkép és a tagok (m: uid → belépés ideje).
+    function validKCodeDoc(d) {
+      return d.keys().hasOnly(['kid', 'name', 'icon', 'm'])
+        && d.kid is string && validKName(d.name) && validKIcon(d.icon)
+        && d.m is map && d.m.size() <= 100;
+    }
+    function validKMemberDoc(d) {
+      return d.keys().hasOnly(['at', 'code']) && d.at is number && validKCode(d.code);
+    }
+    function validMessage(d) {
+      return d.keys().hasOnly(['uid', 'text', 'at'])
+        && d.uid == request.auth.uid
+        && d.text is string && d.text.size() > 0 && d.text.size() <= 500
+        && d.at is number;
+    }
+    function validFriendReq(rid, d) {
+      return d.keys().hasOnly(['from', 'to', 'at'])
+        && d.from is string && d.to is string && d.from != d.to
+        && rid == d.from + '_' + d.to
+        && d.at is number;
+    }
+    // Kocsma-meghívó egy barátnak: a meghívó a kocsma tagja, és az érvényes meghívókódot küldi.
+    function validInvite(v) {
+      return v is map
+        && v.keys().hasOnly(['kid', 'code', 'name', 'icon', 'at'])
+        && v.kid is string && validKCode(v.code) && validKName(v.name) && validKIcon(v.icon)
+        && v.at is number;
+    }
+    // Barátság: létrejön, ha a címzett elfogadja a kérést (mindkét oldalt ő írja, a kérés még megvan).
+    function friendshipOk(uid, fid) {
+      return member() && uid != fid
+        && request.resource.data.keys().hasOnly(['at'])
+        && request.resource.data.at is number
+        && ((request.auth.uid == uid && exists(/databases/$(database)/documents/friendReqs/$(fid + '_' + uid)))
+          || (request.auth.uid == fid && exists(/databases/$(database)/documents/friendReqs/$(uid + '_' + fid))));
+    }
+
+    // Saját ivós játék.
+    function validGame(d) {
+      return d.keys().hasOnly(['name', 'players', 'tools', 'desc', 'createdAt', 'updatedAt'])
+        && d.name is string && d.name.size() <= 60
+        && d.players is string && d.players.size() <= 30
+        && d.tools is string && d.tools.size() <= 300
+        && d.desc is string && d.desc.size() <= 2000
+        && d.createdAt is number
+        && d.updatedAt is number;
+    }
 
     // Felhasználónév -> fiók. Egy név csak egyszer létezhet (a dokumentum azonosítója a kisbetűs név).
     match /usernames/{key} {
@@ -97,14 +192,135 @@ service cloud.firestore {
       allow delete: if isMeAny(uid) || ownerFresh();
     }
 
-    // Csak a tulajdonos (és friss jelszóval az app tulajdonosa) láthatja: hozzájárulás és a bulik listája.
+    // Napi napló: csak a felhasználó látja és írja (a tulajdonos friss jelszóval javíthat benne).
+    match /users/{uid}/days/{dayId} {
+      allow read: if isMeAny(uid) || ownerFresh();
+      allow create, update: if (ownerFresh() || isMe(uid)) && validDay(dayId, request.resource.data);
+      allow delete: if isMeAny(uid) || ownerFresh();
+    }
+
+    // Saját ivós játékok: csak a felhasználó látja és írja.
+    match /users/{uid}/games/{gameId} {
+      allow read: if isMeAny(uid) || ownerFresh();
+      allow create, update: if isMe(uid) && validGame(request.resource.data);
+      allow delete: if isMeAny(uid) || ownerFresh();
+    }
+
+    // Barátok: csak a felhasználó látja a saját listáját. Az „invite” mezőbe a barát írhat kocsma-meghívót.
+    match /users/{uid}/friends/{fid} {
+      allow read: if isMeAny(uid) || ownerFresh();
+      allow create: if friendshipOk(uid, fid);
+      allow update: if friendshipOk(uid, fid)
+        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['invite'])
+          && ((member() && request.auth.uid == fid
+                && validInvite(request.resource.data.invite)
+                && exists(kMemberPath(request.resource.data.invite.kid, request.auth.uid))
+                && get(kocsmaPath(request.resource.data.invite.kid)).data.code == request.resource.data.invite.code)
+            || (isMeAny(uid) && !('invite' in request.resource.data))));
+      allow delete: if isMeAny(uid) || (account() && request.auth.uid == fid) || ownerFresh();
+    }
+
+    // Csak a tulajdonos (és friss jelszóval az app tulajdonosa) láthatja: hozzájárulás, a bulik listája,
+    // a saját italnevek, az átállás jelzője, a kocsmái és azok a kocsmák, ahová üzenetet írt.
     match /private/{uid} {
       allow read: if isMeAny(uid) || ownerFresh();
       allow create, update: if isMe(uid)
-        && request.resource.data.keys().hasOnly(['consent', 'parties', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['consent', 'parties', 'drinks', 'migrated', 'kocsmak', 'kmsg', 'updatedAt'])
         && (!('consent' in request.resource.data) || request.resource.data.consent is map)
-        && (!('parties' in request.resource.data) || request.resource.data.parties is map);
+        && (!('parties' in request.resource.data) || request.resource.data.parties is map)
+        && (!('drinks' in request.resource.data) || request.resource.data.drinks is map)
+        && (!('migrated' in request.resource.data) || request.resource.data.migrated is number)
+        && (!('kocsmak' in request.resource.data) || request.resource.data.kocsmak is map)
+        && (!('kmsg' in request.resource.data) || request.resource.data.kmsg is map);
       allow delete: if isMeAny(uid) || ownerFresh();
+    }
+
+    // Barátkérések: a dokumentum azonosítója „küldő_címzett”. Csak a két érintett látja.
+    match /friendReqs/{rid} {
+      allow read: if (account() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid)) || ownerFresh();
+      allow create: if member()
+        && validFriendReq(rid, request.resource.data)
+        && request.resource.data.from == request.auth.uid
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.to))
+        && !exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(request.resource.data.to));
+      allow update: if false;
+      allow delete: if (account() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid)) || ownerFresh();
+    }
+
+    // Kocsmák: csak a tagok látják. Az alapító kezeli; a kocsmás bulit bármelyik tag elindíthatja.
+    match /kocsmak/{kid} {
+      allow get: if ownerFresh() || isKMember(kid);
+      allow list: if ownerFresh();
+      allow create: if member()
+        && validKocsma(request.resource.data)
+        && request.resource.data.owner == request.auth.uid
+        && existsAfter(kMemberPath(kid, request.auth.uid))
+        && existsAfter(kCodePath(request.resource.data.code))
+        && getAfter(kCodePath(request.resource.data.code)).data.kid == kid;
+      allow update: if validKocsma(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && ((member() && resource.data.owner == request.auth.uid
+              && (request.resource.data.owner == resource.data.owner
+                || existsAfter(kMemberPath(kid, request.resource.data.owner)))
+              && (request.resource.data.code == resource.data.code
+                || (existsAfter(kCodePath(request.resource.data.code))
+                  && getAfter(kCodePath(request.resource.data.code)).data.kid == kid)))
+          || (isKMember(kid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['party', 'updatedAt']))
+          // Ha az alapító már nem tag (pl. letiltva törölte a fiókját), egy tag átveheti a kocsmát.
+          || (isKMember(kid)
+            && !exists(kMemberPath(kid, resource.data.owner))
+            && request.resource.data.owner == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['owner', 'updatedAt']))
+          || ownerFresh());
+      allow delete: if (account() && resource.data.owner == request.auth.uid) || ownerFresh();
+    }
+
+    // Tagság: belépni csak az érvényes meghívókóddal lehet (a kód dokumentumába is be kell írni magát).
+    match /kocsmak/{kid}/members/{uid} {
+      allow read: if ownerFresh() || isKMember(kid);
+      allow create: if isMe(uid)
+        && validKMemberDoc(request.resource.data)
+        && existsAfter(kCodePath(request.resource.data.code))
+        && getAfter(kCodePath(request.resource.data.code)).data.kid == kid
+        && (uid in getAfter(kCodePath(request.resource.data.code)).data.m);
+      allow update: if false;
+      allow delete: if ownerFresh()
+        || isMeAny(uid)
+        || (member() && get(kocsmaPath(kid)).data.owner == request.auth.uid);
+    }
+
+    // Chat: csak a tagok olvassák és írják. A saját üzenetét bárki törölheti (kilépés után is), az alapító bármelyiket.
+    match /kocsmak/{kid}/messages/{mid} {
+      allow read: if ownerFresh() || (account() && resource.data.uid == request.auth.uid) || isKMember(kid);
+      allow create: if isKMember(kid) && validMessage(request.resource.data);
+      allow update: if false;
+      allow delete: if ownerFresh()
+        || (account() && resource.data.uid == request.auth.uid)
+        || (member() && get(kocsmaPath(kid)).data.owner == request.auth.uid);
+    }
+
+    // Meghívókód → kocsma (előnézet). Az alapító hozza létre és cseréli; a tagok csak a saját belépésüket írják bele.
+    match /kocsmaCodes/{code} {
+      allow get: if member() || ownerFresh();
+      allow list: if false;
+      allow create: if validKCode(code)
+        && validKCodeDoc(request.resource.data)
+        && (ownerFresh()
+          || (member()
+            && getAfter(kocsmaPath(request.resource.data.kid)).data.owner == request.auth.uid
+            && getAfter(kocsmaPath(request.resource.data.kid)).data.code == code));
+      allow update: if validKCodeDoc(request.resource.data)
+        && request.resource.data.kid == resource.data.kid
+        && ((member() && getAfter(kocsmaPath(resource.data.kid)).data.owner == request.auth.uid)
+          || (account()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['m'])
+            && request.resource.data.m.diff(resource.data.m).affectedKeys().hasOnly([request.auth.uid])
+            && (request.auth.uid in request.resource.data.m) == existsAfter(kMemberPath(resource.data.kid, request.auth.uid))
+            && (!(request.auth.uid in request.resource.data.m) || member()))
+          || ownerFresh());
+      allow delete: if ownerFresh()
+        || (account() && (!exists(kocsmaPath(resource.data.kid))
+          || get(kocsmaPath(resource.data.kid)).data.owner == request.auth.uid));
     }
 
     // A buli neve és kezdete.
@@ -149,7 +365,7 @@ service cloud.firestore {
     match /adminlog/{id} {
       allow read: if isOwner();
       allow create: if ownerFresh()
-        && request.resource.data.keys().hasOnly(['at', 'action', 'target', 'party', 'detail'])
+        && request.resource.data.keys().hasOnly(['at', 'action', 'target', 'party', 'kocsma', 'detail'])
         && request.resource.data.at is number
         && request.resource.data.action is string;
       allow update, delete: if false;
